@@ -13,13 +13,13 @@ void main(int argc, char** argv) {
     puts("transfer is not succecfull");
   }
   
-  finish(m);
+  finish(res, m);
 }
 
-void finish(M* m) {
+void finish(int res, M* m) {
   puts("@_@\n FINISHED TRANSFERING FILE MANE");
   close(m->sock);
-  fclose(m->fd);
+  if (res != -2 ) fclose(m->fd);
   free(m->buf);
   free(m->inf);
   free(m);
@@ -98,7 +98,7 @@ int exchange(M* d) {
 
   if (res < 0) {
     perror("connect");
-    return -1;
+    return -2;
   }
 
   d->fd = fopen(d->fn, "r");
