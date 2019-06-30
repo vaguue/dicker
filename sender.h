@@ -31,4 +31,4 @@ M* parse_args(int,char**);
 
 int exchange(M*);
 
-void finish(M*);
+void finish(int, M*);
