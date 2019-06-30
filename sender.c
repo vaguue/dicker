@@ -17,6 +17,7 @@ void main(int argc, char** argv) {
 }
 
 void finish(M* m) {
+  puts("@_@\n FINISHED TRANSFERING FILE MANE");
   close(m->sock);
   fclose(m->fd);
   free(m->buf);
@@ -62,6 +63,7 @@ M* parse_args(int argc, char** argv) {
   
   if (ip == NULL || m->fn == NULL || port == NULL) {
     printf("@_@\n not enough args blin\n");
+    free(m);
     return NULL;
   }
 
@@ -74,6 +76,8 @@ M* parse_args(int argc, char** argv) {
 
   int res = getaddrinfo(ip, port, &hints, &m->inf);
   if (res < 0) {
+    free(m->inf);
+    free(m);
     perror("getaddrinfo");
     return NULL;
   }
