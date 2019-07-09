@@ -1,29 +1,27 @@
 #include <sys/socket.h>
+#include <sys/stat.h>
+#include <stdint.h>
 #include <sys/types.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <unistd.h>
+#include <netdb.h>
 #include <getopt.h>
 #include <assert.h>
-
-#define M Mandata
-
+#define DEFAULT_PACKETSIZE 1064;
 typedef struct Mandata {
 	char* fn;
-	FILE* fd;//File descriptor
-	int max_size;
-	int pocket_size;
-	int socket;
-	int port;
+	FILE* fd;
+	char* port;
+	int packet_size;
+	struct addrinfo* inf;
+	void* buf;
 } Mandata;
 
 
-M* parse_args(int, char*);//gets args from command line
+Mandata* parse_args (int, char**);
 
-int exchange (M*);
+int exchange (Mandata*);
 
-void finish();//at exit)0))
-
-
-
+int finish (Mandata*);
 
