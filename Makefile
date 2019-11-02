@@ -1,6 +1,6 @@
-OBJECTS += sender.o
-DEPS += sender.h
-CFLAGS += -g
+OBJECTS += dicker.o
+DEPS += dicker.h
+CFLAGS += -g -O3
 CC = gcc
 
 mane: $(OBJECTS)
