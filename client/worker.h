@@ -20,14 +20,14 @@
 #include "task.h"
 #include "compressor.h"
 #include "storageReader.h"
-#include "queue.h"
+#include "chan.h"
 
 using namespace dicker;
 
 const size_t MAX_BUF_SIZE = 256 * 1024;
 const size_t OUT_BUF_SIZE = MAX_BUF_SIZE + MAX_BUF_SIZE / 16 + 1024;
 
-struct Worker : Queue<Task, Worker> {
+struct Worker : Chan<WorkerTask, Worker, 8> {
   uint8_t inBuf[MAX_BUF_SIZE];
   uint8_t outBuf[OUT_BUF_SIZE];
 
@@ -58,8 +58,6 @@ struct Worker : Queue<Task, Worker> {
     if (!net::recvExact(this->fd, reply, sizeof(reply)) || reply[kMagic.size()] != 0) {
       throw std::runtime_error{"handshake rejected by server"};
     }
-
-    this->startQueue();
   }
 
   std::vector<uint8_t> handshake(const Conn& conn) {
@@ -91,10 +89,14 @@ struct Worker : Queue<Task, Worker> {
 
   void process(const Task& t) {
     std::vector<uint8_t> header;
+
     header.push_back(static_cast<uint8_t>(t.type));
+
     std::string path = t.pathname;
+
     append_u16(header, static_cast<uint16_t>(path.size()));
     header.insert(header.end(), path.begin(), path.end());
+
     if (t.type == UnitType::Chunk) {
       append_u64(header, t.offset);
     }
@@ -107,19 +109,29 @@ struct Worker : Queue<Task, Worker> {
 
     size_t remaining = t.length;
     size_t fileOffset = t.offset;
+
     while (remaining > 0) {
       size_t want = std::min(remaining, MAX_BUF_SIZE);
-      size_t got = this->storage->read_range(this->inBuf, t.pathname, fileOffset, want);
+
+      StorageTask st { t.type, t.pathname, fileOffset, want, this->inBuf };
+
+      this->storage->submitAndWait(st);
+
+      size_t& got = st.got;
+
       if (got == 0) {
         break;
       }
+
       if (this->integrity) {
         XXH64_update(&checksum, this->inBuf, got);
       }
+
       size_t produced = this->compressor->update(this->inBuf, got, this->outBuf, OUT_BUF_SIZE);
       if (produced > 0) {
         this->sendBlock(this->outBuf, produced);
       }
+
       remaining -= got;
       fileOffset += got;
     }

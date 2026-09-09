@@ -5,26 +5,24 @@
 #include <cstdio>
 #include <filesystem>
 
-#include "queue.h"
+#include "chan.h"
 #include "task.h"
 
 namespace fs = std::filesystem;
 
-struct StorageReader : Queue<Task, StorageReader> {
-  std::size_t read_range(std::uint8_t* buffer, const char* pathname,
-                         std::size_t offset, std::size_t len) {
-    FILE* file = std::fopen(pathname, "rb");
+struct StorageReader : Chan<StorageTask, StorageReader, 64> {
+  void process(StorageTask& t) {
+    FILE* file = std::fopen(t.pathname, "rb");
     if (file == nullptr) {
-      return 0;
+      return;
     }
-    if (offset != 0) {
-      std::fseek(file, static_cast<long>(offset), SEEK_SET);
+    if (t.offset != 0) {
+      std::fseek(file, static_cast<long>(t.offset), SEEK_SET);
     }
-    std::size_t got = std::fread(buffer, 1, len, file);
-    std::fclose(file);
-    return got;
-  }
 
-  void process(const Task&) {
+    std::size_t got = std::fread(t.buf, 1, t.length, file);
+
+    std::fclose(file);
+    t.got = got;
   }
 };
