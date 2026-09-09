@@ -26,7 +26,7 @@ using namespace dicker;
 const size_t MAX_BUF_SIZE = 256 * 1024;
 const size_t OUT_BUF_SIZE = MAX_BUF_SIZE + MAX_BUF_SIZE / 16 + 1024;
 
-struct Worker : Chan<Worker, WorkerTask, 8> {
+struct Worker : Chan<Worker, WorkerTask, 128> {
   uint8_t inBuf[MAX_BUF_SIZE];
   uint8_t outBuf[OUT_BUF_SIZE];
 
@@ -48,7 +48,7 @@ struct Worker : Chan<Worker, WorkerTask, 8> {
 
     auto hs = this->handshake(conn);
 
-    if (!this->network.submitAndWait({hs.data(), hs.size()})) {
+    if (!this->network.await({hs.data(), hs.size()})) {
       throw std::runtime_error{"failed to send handshake"};
     }
 
@@ -114,7 +114,7 @@ struct Worker : Chan<Worker, WorkerTask, 8> {
 
       StorageTask st { t.type, t.pathname, fileOffset, want, this->inBuf };
 
-      this->storage->submitAndWait(st);
+      this->storage->await(st);
 
       size_t& got = st.got;
 

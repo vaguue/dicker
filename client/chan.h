@@ -105,7 +105,7 @@ struct Chan {
     return true;
   }
 
-  bool submitAndWait(Task t) {
+  bool await(Task t) {
     Completion c;
     t.completion = &c;
 
