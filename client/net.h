@@ -351,7 +351,7 @@ struct NetworkClient : Chan<NetworkClient, NetworkTask, 32> {
   }
 
   void process(NetworkTask& t) {
-    net::sendAll(this->fd, t.data, t.length);
+    net::sendAll(this->fd, t.data.data(), t.data.size());
   }
 
   bool recvExact(void* buf, size_t len) {

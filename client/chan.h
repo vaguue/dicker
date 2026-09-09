@@ -2,8 +2,6 @@
 
 #include <array>
 #include <thread>
-#include <mutex>
-#include <condition_variable>
 #include <atomic>
 #include <cstdint>
 #include <cstddef>
@@ -25,24 +23,34 @@ struct Completion {
   }
 };
 
+// Single-producer / single-consumer channel. One thread enqueues, the consumer
+// thread runs Impl::process on each item. Lock-free on the hot path: the
+// producer owns tail, the consumer owns head, both monotonic; a full/empty
+// channel sleeps instead of spinning. Cap must be a power of two.
+//
+// SPSC is a hard invariant: exactly one thread may call enqueue/tryEnqueue/await
+// on a given channel. Fan-in (several producers into one channel) is undefined.
+//
+// Blocking is done on two event-count gates rather than on head/tail directly:
+// atomic wait only rechecks the value it waits on, so waiting on tail would miss
+// a `stopped` flip (tail never moves on shutdown). Each gate is bumped by its
+// data event AND by stop, and every waiter rechecks its predicate after sampling
+// the gate, so there is no lost wakeup.
 template<typename Impl, typename Task, size_t Cap>
 struct Chan {
+  static constexpr size_t Mask = Cap - 1;
+
   std::array<Task, Cap> buf;
 
-  size_t head = 0;
-  size_t tail = 0;
-  size_t count = 0;
+  alignas(64) std::atomic<size_t> head{0};
+  alignas(64) std::atomic<size_t> tail{0};
 
-  std::mutex m;
-
-  std::condition_variable notEmpty;
-  std::condition_variable notFull;
+  alignas(64) std::atomic<uint32_t> notEmptyGate{0};
+  alignas(64) std::atomic<uint32_t> notFullGate{0};
+  alignas(64) std::atomic<bool> stopped{false};
 
   std::thread th;
 
-  bool stop = false;
-
-  std::atomic<uint32_t> load{0};
   std::atomic<AffinityKey> warm{NONE};
 
   Chan() = default;
@@ -54,7 +62,8 @@ struct Chan {
   }
 
   uint32_t occupancy() const {
-    return this->load.load(std::memory_order_relaxed);
+    return static_cast<uint32_t>(this->tail.load(std::memory_order_relaxed) -
+                                 this->head.load(std::memory_order_relaxed));
   }
 
   AffinityKey warmKey() const {
@@ -65,43 +74,47 @@ struct Chan {
     this->warm.store(key, std::memory_order_relaxed);
   }
 
+  void publish(size_t tl, Task&& t) {
+    this->buf[tl & Mask] = std::move(t);
+    this->tail.store(tl + 1, std::memory_order_release);
+    this->notEmptyGate.fetch_add(1, std::memory_order_release);
+    this->notEmptyGate.notify_one();
+  }
+
   bool tryEnqueue(Task t) {
-    {
-      std::lock_guard lk(this->m);
-
-      if (this->stop || this->count == Cap) {
-        return false;
-      }
-
-      this->buf[this->tail] = std::move(t);
-      this->tail = (this->tail + 1) % Cap;
-      this->count += 1;
+    if (this->stopped.load(std::memory_order_acquire)) {
+      return false;
     }
 
-    this->load.fetch_add(1, std::memory_order_relaxed);
-    this->notEmpty.notify_one();
+    const size_t tl = this->tail.load(std::memory_order_relaxed);
+    if (tl - this->head.load(std::memory_order_acquire) >= Cap) {
+      return false;
+    }
+
+    this->publish(tl, std::move(t));
     return true;
   }
 
   bool enqueue(Task t) {
-    {
-      std::unique_lock lk(this->m);
+    const size_t tl = this->tail.load(std::memory_order_relaxed);
 
-      this->notFull.wait(lk, [&] {
-        return this->stop || this->count < Cap;
-      });
-
-      if (this->stop) {
+    for (;;) {
+      if (this->stopped.load(std::memory_order_acquire)) {
         return false;
       }
+      if (tl - this->head.load(std::memory_order_acquire) < Cap) {
+        break;
+      }
 
-      this->buf[this->tail] = std::move(t);
-      this->tail = (this->tail + 1) % Cap;
-      this->count += 1;
+      const uint32_t g = this->notFullGate.load(std::memory_order_acquire);
+      if (tl - this->head.load(std::memory_order_acquire) < Cap ||
+          this->stopped.load(std::memory_order_acquire)) {
+        continue;
+      }
+      this->notFullGate.wait(g, std::memory_order_acquire);
     }
 
-    this->load.fetch_add(1, std::memory_order_relaxed);
-    this->notEmpty.notify_one();
+    this->publish(tl, std::move(t));
     return true;
   }
 
@@ -118,45 +131,48 @@ struct Chan {
   }
 
   void run() {
-    while (true) {
-      Task t;
+    size_t hd = this->head.load(std::memory_order_relaxed);
 
-      {
-        std::unique_lock lk(this->m);
-
-        this->notEmpty.wait(lk, [&] {
-          return this->stop || this->count > 0;
-        });
-
-        if (this->stop && this->count == 0) {
-          return;
+    for (;;) {
+      if (hd == this->tail.load(std::memory_order_acquire)) {
+        if (this->stopped.load(std::memory_order_acquire)) {
+          if (hd == this->tail.load(std::memory_order_acquire)) {
+            return;
+          }
+          continue;
         }
 
-        t = std::move(this->buf[this->head]);
-        this->head = (this->head + 1) % Cap;
-        this->count -= 1;
+        const uint32_t g = this->notEmptyGate.load(std::memory_order_acquire);
+        if (hd != this->tail.load(std::memory_order_acquire) ||
+            this->stopped.load(std::memory_order_acquire)) {
+          continue;
+        }
+        this->notEmptyGate.wait(g, std::memory_order_acquire);
+        continue;
       }
 
-      this->notFull.notify_one();
+      Task t = std::move(this->buf[hd & Mask]);
+      hd += 1;
+      this->head.store(hd, std::memory_order_release);
+      this->notFullGate.fetch_add(1, std::memory_order_release);
+      this->notFullGate.notify_one();
 
       static_cast<Impl*>(this)->process(t);
 
       if (t.completion != nullptr) {
         t.completion->signal();
       }
-
-      this->load.fetch_sub(1, std::memory_order_relaxed);
     }
   }
 
   ~Chan() {
-    {
-      std::lock_guard lk(this->m);
-      this->stop = true;
-    }
+    this->stopped.store(true, std::memory_order_release);
 
-    this->notEmpty.notify_all();
-    this->notFull.notify_all();
+    this->notEmptyGate.fetch_add(1, std::memory_order_release);
+    this->notEmptyGate.notify_all();
+    this->notFullGate.fetch_add(1, std::memory_order_release);
+    this->notFullGate.notify_all();
+
     if (this->th.joinable()) {
       this->th.join();
     }
