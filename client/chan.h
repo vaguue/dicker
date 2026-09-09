@@ -131,6 +131,13 @@ struct Chan {
   }
 
   void run() {
+    // If Impl defines init(), run it once on this (the consumer) thread before
+    // consuming. This keeps everything Impl does — including producing into other
+    // channels — on a single thread, which is what SPSC requires.
+    if constexpr (requires(Impl* self) { self->init(); }) {
+      static_cast<Impl*>(this)->init();
+    }
+
     size_t hd = this->head.load(std::memory_order_relaxed);
 
     for (;;) {

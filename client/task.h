@@ -25,7 +25,7 @@ struct WorkerTask : Task {
     dicker::UnitType type,
     const char* path,
     size_t offset,
-    size_t length,
+    size_t length
   ) : Task{type, {}, offset, length}
   {
     std::strncpy(this->pathname, path, MAX_PATH - 1);

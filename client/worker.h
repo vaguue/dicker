@@ -35,18 +35,21 @@ struct Worker : Chan<Worker, WorkerTask, 128> {
   std::shared_ptr<StorageReader> storage;
   std::unique_ptr<StreamCompressor> compressor;
   NetworkClient network;
+  Conn conn;
 
-  Worker(std::unique_ptr<StreamCompressor> compressor, std::shared_ptr<StorageReader> storage)
-    : storage{std::move(storage)}, compressor{std::move(compressor)} {
+  Worker(std::unique_ptr<StreamCompressor> compressor, std::shared_ptr<StorageReader> storage, Conn conn)
+    : storage{std::move(storage)}, compressor{std::move(compressor)}, conn{std::move(conn)} {
   }
 
-  void init(const Conn& conn) {
-    this->integrity = has_flag(conn.flags, HandshakeFlag::IntegrityChecks);
+  // Runs on the worker's own consumer thread (invoked by Chan::run), so the
+  // handshake and every later block share one producer into `network`.
+  void init() {
+    this->integrity = has_flag(this->conn.flags, HandshakeFlag::IntegrityChecks);
 
-    this->network.init(conn);
+    this->network.init(this->conn);
     this->network.start();
 
-    auto hs = this->handshake(conn);
+    auto hs = this->handshake(this->conn);
 
     if (!this->network.await({hs.data(), hs.size()})) {
       throw std::runtime_error{"failed to send handshake"};

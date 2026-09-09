@@ -2,6 +2,7 @@
 
 #include <set>
 #include <memory>
+#include <algorithm>
 #include <filesystem>
 
 #include "protocol.hpp"
@@ -27,23 +28,30 @@ struct Scheduler {
   Config cfg;
   std::vector<fs::path> roots;
   std::vector<std::unique_ptr<Worker>> workers;
-  std::vector<std::unique_ptr<StorageReader>> readers;
+  std::vector<std::shared_ptr<StorageReader>> readers;
 
   const uint32_t busyThreshold = 32;
 
   Scheduler(const Config& cfg) : cfg{cfg} {
-    readers.reserve(cfg.diskConcurrency);
+    // SPSC storage channels: each reader may be fed by exactly one worker, so
+    // there must be at least as many readers as workers (a reader is dedicated,
+    // not shared). diskConcurrency below workers cannot bound disk IO by sharing
+    // a reader queue — that needs a shared limiter, decided separately.
+    size_t readerCount = std::max(cfg.diskConcurrency, cfg.workers);
 
-    for (int i{}; i < cfg.diskConcurrency; ++i) {
-      readers.emplace_back(std::make_unique<StorageReader>());
+    readers.reserve(readerCount);
+
+    for (size_t i = 0; i < readerCount; ++i) {
+      readers.emplace_back(std::make_shared<StorageReader>());
     }
 
     workers.reserve(cfg.workers);
 
-    for (int i{}; i < cfg.workers; ++i) {
+    for (size_t i = 0; i < cfg.workers; ++i) {
       workers.emplace_back(std::make_unique<Worker>(
         makeCompressor(cfg.compressionAlgo),
-        readers[i % readers.length])
+        readers[i],
+        cfg.conn)
       );
     }
   }
@@ -85,12 +93,11 @@ struct Scheduler {
 
   void start() {
     for (auto& e : readers) {
-      e.start();
+      e->start();
     }
 
     for (auto& e : workers) {
-      e.init(this->cfg.conn);
-      e.start();
+      e->start();
     }
 
     for (auto& e : roots) {
