@@ -25,7 +25,7 @@ struct Completion {
   }
 };
 
-template<typename Task, typename Impl, size_t Cap>
+template<typename Impl, typename Task, size_t Cap>
 struct Chan {
   std::array<Task, Cap> buf;
 

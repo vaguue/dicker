@@ -16,7 +16,6 @@
 #include "hmac_sha256.hpp"
 
 #include "net.h"
-#include "conn.h"
 #include "task.h"
 #include "compressor.h"
 #include "storageReader.h"
@@ -27,40 +26,39 @@ using namespace dicker;
 const size_t MAX_BUF_SIZE = 256 * 1024;
 const size_t OUT_BUF_SIZE = MAX_BUF_SIZE + MAX_BUF_SIZE / 16 + 1024;
 
-struct Worker : Chan<WorkerTask, Worker, 8> {
+struct Worker : Chan<Worker, WorkerTask, 8> {
   uint8_t inBuf[MAX_BUF_SIZE];
   uint8_t outBuf[OUT_BUF_SIZE];
 
-  net::socket_t fd = net::INVALID;
   bool integrity = false;
+
   std::shared_ptr<StorageReader> storage;
   std::unique_ptr<StreamCompressor> compressor;
+  NetworkClient network;
 
   Worker(std::unique_ptr<StreamCompressor> compressor, std::shared_ptr<StorageReader> storage)
     : storage{std::move(storage)}, compressor{std::move(compressor)} {
   }
 
-  void start(const Conn& conn) {
+  void init(const Conn& conn) {
     this->integrity = has_flag(conn.flags, HandshakeFlag::IntegrityChecks);
-    this->fd = net::tcpConnect(conn.host, conn.port, conn.proxy);
 
-    if (!net::isValid(this->fd)) {
-      throw std::runtime_error{"failed to connect to server"};
-    }
+    this->network.init(conn);
+    this->network.start();
 
     auto hs = this->handshake(conn);
 
-    if (!net::sendAll(this->fd, hs.data(), hs.size())) {
+    if (!this->network.submitAndWait({hs.data(), hs.size()})) {
       throw std::runtime_error{"failed to send handshake"};
     }
 
     uint8_t reply[kHandshakeReplySize];
-    if (!net::recvExact(this->fd, reply, sizeof(reply)) || reply[kMagic.size()] != 0) {
+    if (!this->network.recvExact(reply, sizeof(reply)) || reply[kMagic.size()] != 0) {
       throw std::runtime_error{"handshake rejected by server"};
     }
   }
 
-  std::vector<uint8_t> handshake(const Conn& conn) {
+  std::vector<uint8_t> handshake(const Conn& conn) { //TODO move to Conn I think
     std::vector<uint8_t> out;
 
     out.insert(out.end(), kMagic.begin(), kMagic.end());
@@ -83,8 +81,9 @@ struct Worker : Chan<WorkerTask, Worker, 8> {
     uint8_t header[5];
     header[0] = static_cast<uint8_t>(BlockType::Data);
     write_u32_le(header + 1, static_cast<uint32_t>(len));
-    net::sendAll(this->fd, header, sizeof(header));
-    net::sendAll(this->fd, data, len);
+
+    this->network.enqueue({header, sizeof(header)});
+    this->network.enqueue({data, len});
   }
 
   void process(const Task& t) {
@@ -100,7 +99,7 @@ struct Worker : Chan<WorkerTask, Worker, 8> {
     if (t.type == UnitType::Chunk) {
       append_u64(header, t.offset);
     }
-    net::sendAll(this->fd, header.data(), header.size());
+    this->network.enqueue({header.data(), header.size()});
 
     XXH64_state_t checksum;
     if (this->integrity) {
@@ -142,17 +141,17 @@ struct Worker : Chan<WorkerTask, Worker, 8> {
     }
 
     uint8_t endOfUnit = static_cast<uint8_t>(BlockType::EndOfUnit);
-    net::sendAll(this->fd, &endOfUnit, 1);
+    this->network.enqueue({&endOfUnit, 1});
 
     if (this->integrity) {
       uint8_t checksumBytes[8];
       write_u64_le(checksumBytes, XXH64_digest(&checksum));
-      net::sendAll(this->fd, checksumBytes, sizeof(checksumBytes));
+      this->network.enqueue({checksumBytes, sizeof(checksumBytes)});
     }
   }
 
   void finish() {
     auto eof = static_cast<uint8_t>(UnitType::End);
-    net::sendAll(this->fd, &eof, 1);
+    this->network.enqueue({&eof, 1});
   }
 };

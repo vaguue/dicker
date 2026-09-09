@@ -20,10 +20,22 @@ struct StorageTask : Task {
   size_t got = 0;
   Completion* completion = nullptr;
 
-  StorageTask(dicker::UnitType type, const char* path, size_t offset, size_t length, uint8_t* buf, Completion* completion = nullptr)
-      : Task{type, {}, offset, length}, buf(buf), got(0), completion(completion)
+  StorageTask(
+    dicker::UnitType type,
+    const char* path,
+    size_t offset,
+    size_t length,
+    uint8_t* buf,
+    Completion* completion = nullptr
+  ) : Task{type, {}, offset, length}, buf(buf), got(0), completion(completion)
   {
-      std::strncpy(this->pathname, path, MAX_PATH - 1);
-      this->pathname[MAX_PATH - 1] = '\0';
+    std::strncpy(this->pathname, path, MAX_PATH - 1);
+    this->pathname[MAX_PATH - 1] = '\0';
   }
+};
+
+struct NetworkTask {
+  const uint8_t* data;
+  size_t length;
+  Completion* completion = nullptr;
 };

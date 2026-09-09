@@ -10,7 +10,7 @@
 
 namespace fs = std::filesystem;
 
-struct StorageReader : Chan<StorageTask, StorageReader, 64> {
+struct StorageReader : Chan<StorageReader, StorageTask, 64> {
   void process(StorageTask& t) {
     FILE* file = std::fopen(t.pathname, "rb");
     if (file == nullptr) {

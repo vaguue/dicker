@@ -36,18 +36,11 @@ case "$LDFLAGS" in
 esac
 
 
-SOURCES="main.cxx \
-  chan.h \
-  compressor.h \
-  conn.h \
-  net.h \
-  storageReader.h \
-  task.h \
-  worker.h"
+SRC="main.cxx"
 
 mkdir -p out
 
 echo "[*] CFLAGS=$CFLAGS"
 echo "[*] LDFLAGS=$LDFLAGS"
-zig c++ -std=c++20 -O2 -Wall -Wextra $SOURCES -o out/dicker-server $CFLAGS $LDFLAGS
+zig c++ -std=c++20 -O2 -Wall -Wextra $SRC -o out/dicker $CFLAGS $LDFLAGS
 echo "[+] built ./out/dicker"
