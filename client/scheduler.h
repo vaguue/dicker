@@ -93,7 +93,7 @@ struct Scheduler {
       }
     }
 
-    if (chosen >= 0) {
+    if (chosen != static_cast<size_t>(-1)) {
       return chosen;
     }
 

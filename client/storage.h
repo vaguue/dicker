@@ -6,11 +6,12 @@
 #include <cstddef>
 
 #ifdef _WIN32
+  #include <winsock2.h>   // must precede windows.h
   #include <windows.h>
   #include <vss.h>
   #include <vswriter.h>
   #include <vsbackup.h>
-  // link: vssapi.lib ole32.lib oleaut32.lib
+  // link: vssapi ole32 oleaut32
 #endif
 
 // Counting semaphore used to cap simultaneous disk reads across all reader

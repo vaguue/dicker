@@ -8,11 +8,11 @@
 #include "protocol.h"
 #include "chan.h"
 
-const size_t MAX_PATH = 256;
+const size_t PATH_CAP = 256;
 
 struct Task {
   dicker::UnitType type;
-  char pathname[MAX_PATH];
+  char pathname[PATH_CAP];
   size_t offset, length;
 };
 
@@ -28,8 +28,8 @@ struct WorkerTask : Task {
     size_t length
   ) : Task{type, {}, offset, length}
   {
-    std::strncpy(this->pathname, path, MAX_PATH - 1);
-    this->pathname[MAX_PATH - 1] = '\0';
+    std::strncpy(this->pathname, path, PATH_CAP - 1);
+    this->pathname[PATH_CAP - 1] = '\0';
   }
 };
 

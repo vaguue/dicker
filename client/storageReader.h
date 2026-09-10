@@ -159,8 +159,8 @@ struct StorageReader : Chan<StorageReader, ReadRequest, 8> {
   void submit(dicker::UnitType type, const char* path, uint64_t offset, uint64_t length) {
     ReadRequest req;
     req.type = type;
-    std::strncpy(req.pathname, path, MAX_PATH - 1);
-    req.pathname[MAX_PATH - 1] = '\0';
+    std::strncpy(req.pathname, path, PATH_CAP - 1);
+    req.pathname[PATH_CAP - 1] = '\0';
     req.offset = offset;
     req.length = length;
     this->enqueue(req);
