@@ -40,5 +40,5 @@ int main() {
 - No documentation yet, but the code is pretty simple 
 - The server is mostly vibecoded, the client (the hard part) and the protocol are manual 
 - Everything is built from source using `zig c++`, no 3rd party deps
-- If you want to know how it works check out [arch.md](https://github.com/vaguue/dicker/arch.md)
-- Outperforms rclone on raw disk: [bench.md](https://github.com/vaguue/dicker/bench.md)
+- If you want to know how it works check out [arch.md](https://github.com/vaguue/dicker/blob/main/arch.md)
+- Outperforms rclone on raw disk: [bench.md](https://github.com/vaguue/dicker/blob/main/bench.md)
