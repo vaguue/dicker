@@ -62,8 +62,8 @@ inline Proxy parseProxy(const std::string& url) {
 struct Conn {
   const char* host;
   const char* port;
-  Proxy proxy;
   std::array<uint8_t, 16> sessionId;
   std::string key;
   uint8_t flags;
+  Proxy proxy = {};
 };

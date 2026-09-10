@@ -16,13 +16,14 @@
 namespace fs = std::filesystem;
 
 struct Config {
+  Conn conn;
+
   size_t diskConcurrency = 1;
   size_t workers = 4;
   size_t bigFileThreshold = 256 * 1024 * 1024;
+  size_t chunkSize = 64 * 1024 * 1024;
 
-  dicker::CompressionAlgo compressionAlgo;
-
-  Conn conn;
+  dicker::CompressionAlgo compressionAlgo = dicker::CompressionAlgo::Zstd;
 };
 
 struct Scheduler {
@@ -58,18 +59,22 @@ struct Scheduler {
     }
   }
 
+  void addRoot(fs::path p) {
+    roots.push_back(p);
+  }
+
   size_t selectWorker(AffinityKey incoming) {
-    size_t chosen = 0;
+    size_t chosen = -1;
 
     size_t minIdx = 0;
     size_t minCap = 128;
 
     uint32_t chosenDistance = affinity::kWallCost + 1;
 
-    for (int i{}; i < this->workers.size(); ++i) {
+    for (size_t i{}; i < this->workers.size(); ++i) {
       auto& worker = this->workers[i];
 
-      const wCap = worker.occupancy();
+      auto wCap = worker->occupancy();
 
       if (wCap < minCap) {
         minIdx = i;
@@ -80,9 +85,9 @@ struct Scheduler {
         continue;
       }
 
-      const AffinityKey resident = worker.warmKey();
+      const AffinityKey resident = worker->warmKey();
 
-      const uint32_t distance = affinity::distance(incoming, resident);
+      const uint32_t distance = affinity::distance(static_cast<affinity::AffinityKey>(incoming), static_cast<affinity::AffinityKey>(resident));
 
       if (distance < chosenDistance) {
         chosenDistance = distance;
@@ -90,7 +95,11 @@ struct Scheduler {
       }
     }
 
-    return chosen;
+    if (chosen >= 0) {
+      return chosen;
+    }
+
+    return minIdx;
   }
 
   void start() {
@@ -115,15 +124,32 @@ struct Scheduler {
 
   void run(fs::path root) {
     for (const auto& entry : fs::recursive_directory_iterator(root)) {
-      if (entry.is_regular_file()) {
-        auto size = entry.file_size();
-        if (size >= this->cfg.bigFileThreshold) {
-          //TODO
+      if (!entry.is_regular_file()) {
+        continue;
+      }
+
+      const uint64_t size = entry.file_size();
+      const std::string path = entry.path().string();
+
+      if (size >= this->cfg.bigFileThreshold) {
+        // Split into fixed-size chunks and spread them round-robin across the
+        // workers (= connections). The server reassembles a chunk by pwrite at
+        // its offset, so chunks may travel on different connections and arrive
+        // out of order.
+        const uint64_t chunkSize = this->cfg.chunkSize;
+        size_t n = 0;
+
+        for (uint64_t offset = 0; offset < size; offset += chunkSize, ++n) {
+          const uint64_t len = std::min<uint64_t>(chunkSize, size - offset);
+
+          this->workers[n % this->workers.size()]->enqueue(
+            WorkerTask{ dicker::UnitType::Chunk, path.c_str(),
+                        static_cast<size_t>(offset), static_cast<size_t>(len) });
         }
-        else {
-          this->workers[this->selectWorker(affinity::forPath(entry.path()))]
-            .enqueue({ dicker::UnitType::UnitType, entry.path().c_str() });
-        }
+      }
+      else {
+        this->workers[this->selectWorker(static_cast<AffinityKey>(affinity::forPath(entry.path())))]->enqueue(
+          WorkerTask{ dicker::UnitType::File, path.c_str(), 0, static_cast<size_t>(size) });
       }
     }
   }

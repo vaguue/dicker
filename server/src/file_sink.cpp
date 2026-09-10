@@ -1,6 +1,7 @@
 #include "file_sink.hpp"
 
 #include <algorithm>
+#include <cctype>
 
 namespace dicker {
 
@@ -83,13 +84,21 @@ namespace dicker {
       }
     }
 
+    // Every incoming path is treated as relative to the session dir: an absolute
+    // path /a/b/c (or a Windows C:\a\b from the client) maps to <session>/a/b/c.
+    // Strip a leading drive letter and any leading slashes, then confine. The
+    // ".." rejection and the prefix check below are what keep it from escaping.
+    std::size_t start = 0;
+    if (normalized.size() >= 2 &&
+        std::isalpha(static_cast<unsigned char>(normalized[0])) && normalized[1] == ':') {
+      start = 2;
+    }
+    while (start < normalized.size() && normalized[start] == '/') {
+      start += 1;
+    }
+    normalized.erase(0, start);
+
     std::filesystem::path candidate(normalized);
-    if (candidate.is_absolute()) {
-      return false;
-    }
-    if (!candidate.root_name().empty()) {
-      return false;
-    }
 
     std::filesystem::path lexical = candidate.lexically_normal();
     for (const std::filesystem::path& part : lexical) {

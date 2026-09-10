@@ -39,6 +39,21 @@ struct Worker : Chan<Worker, WorkerTask, 128> {
     : storage{std::move(storage)}, compressor{std::move(compressor)}, conn{std::move(conn)} {
   }
 
+  // The consumer thread produces into `network` and drives `storage`, so it must
+  // be joined before those members are destroyed. The base ~Chan would join it
+  // after members are gone (base is destroyed last), so join it here first. It
+  // drains any queued units before returning.
+  ~Worker() {
+    this->stopped.store(true, std::memory_order_release);
+    this->notEmptyGate.fetch_add(1, std::memory_order_release);
+    this->notEmptyGate.notify_all();
+    this->notFullGate.fetch_add(1, std::memory_order_release);
+    this->notFullGate.notify_all();
+    if (this->th.joinable()) {
+      this->th.join();
+    }
+  }
+
   // Runs on the worker's own consumer thread (invoked by Chan::run), so the
   // handshake and every later block share one producer into `network`.
   void init() {
