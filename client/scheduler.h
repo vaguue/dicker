@@ -13,6 +13,7 @@
 #include "worker.h"
 #include "affinity.h"
 
+namespace dicker {
 namespace fs = std::filesystem;
 
 struct Config {
@@ -142,3 +143,4 @@ struct Scheduler {
     }
   }
 };
+}  // namespace dicker

@@ -11,8 +11,8 @@
 
 #include "protocol.h"
 
-using namespace dicker;
 
+namespace dicker {
 struct StreamCompressor {
   CompressionAlgo algo = CompressionAlgo::None;
 
@@ -134,3 +134,4 @@ inline std::unique_ptr<StreamCompressor> makeCompressor(CompressionAlgo algo) {
   }
   return nullptr;
 }
+}  // namespace dicker

@@ -21,8 +21,8 @@
 #include "storageReader.h"
 #include "chan.h"
 
-using namespace dicker;
 
+namespace dicker {
 const size_t OUT_BUF_SIZE = READ_BLOCK + READ_BLOCK / 16 + 1024;
 
 struct Worker : Chan<Worker, WorkerTask, 128> {
@@ -164,3 +164,4 @@ struct Worker : Chan<Worker, WorkerTask, 128> {
     this->network.enqueue({&eof, 1});
   }
 };
+}  // namespace dicker

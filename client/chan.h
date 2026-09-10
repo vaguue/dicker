@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <utility>
 
+namespace dicker {
 using AffinityKey = uint32_t;
 constexpr AffinityKey NONE = 0;
 
@@ -169,3 +170,4 @@ struct Chan {
     }
   }
 };
+}  // namespace dicker

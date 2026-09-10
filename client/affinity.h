@@ -8,6 +8,7 @@
 #include <unordered_map>
 #include <vector>
 
+namespace dicker {
 namespace affinity {
 
 enum class Flavor : uint8_t {
@@ -164,3 +165,4 @@ inline AffinityKey forPath(const std::filesystem::path& path) {
 }
 
 }
+}  // namespace dicker

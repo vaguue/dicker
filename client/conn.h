@@ -8,6 +8,7 @@
 
 #include "protocol.h"
 
+namespace dicker {
 struct Proxy {
   bool use = false;
   std::string host, port, user, pass;
@@ -179,3 +180,4 @@ struct Conn {
     }
   }
 };
+}  // namespace dicker

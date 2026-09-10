@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <utility>
 
+namespace dicker {
 template<typename T, size_t Cap>
 struct SpscRing {
   static constexpr size_t Mask = Cap - 1;
@@ -82,3 +83,4 @@ struct SpscRing {
     return true;
   }
 };
+}  // namespace dicker

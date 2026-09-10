@@ -17,6 +17,7 @@
 // Counting semaphore used to cap simultaneous disk reads across all reader
 // threads. This is the `diskConcurrency` knob: there is one reader thread per
 // worker (SPSC requires it), but only this many may be reading at once.
+namespace dicker {
 struct Semaphore {
   std::atomic<int> permits;
 
@@ -186,3 +187,4 @@ struct Storage {
   }
 #endif
 };
+}  // namespace dicker

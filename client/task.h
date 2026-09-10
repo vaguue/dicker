@@ -8,6 +8,7 @@
 #include "protocol.h"
 #include "chan.h"
 
+namespace dicker {
 const size_t PATH_CAP = 256;
 
 struct Task {
@@ -46,3 +47,4 @@ struct NetworkTask {
   NetworkTask(const uint8_t* bytes, size_t len) : data(bytes, bytes + len) {
   }
 };
+}  // namespace dicker

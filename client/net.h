@@ -26,6 +26,7 @@
 #include "chan.h"
 #include "task.h"
 
+namespace dicker {
 namespace net {
 
 #ifdef _WIN32
@@ -350,3 +351,4 @@ struct NetworkClient : Chan<NetworkClient, NetworkTask, 32> {
     return net::recvExact(this->fd, buf, len);
   }
 };
+}  // namespace dicker

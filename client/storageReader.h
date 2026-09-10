@@ -16,6 +16,7 @@
 #include "task.h"
 #include "storage.h"
 
+namespace dicker {
 static constexpr size_t READ_BLOCK = 256 * 1024;
 static constexpr size_t READ_AHEAD = 4;
 static constexpr size_t READ_RING = 8;
@@ -167,3 +168,4 @@ struct StorageReader : Chan<StorageReader, ReadRequest, 8> {
     return this->bufs[idx];
   }
 };
+}  // namespace dicker

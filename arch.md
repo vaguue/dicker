@@ -1,6 +1,6 @@
-# Task
+# Goal
 
-And .exe program exports (uploads) a bunch of directories to a specified server, each directory can contain millions of files, or can contain a multiple-gigabytes files. Should be as quick as possible but doesn't hang the whole system CPU and IO-wise, we should be able to cap how intensive the process is.
+An .exe program exports (uploads) a bunch of directories to a specified server, each directory can contain millions of files, or can contain a multiple-gigabytes files. Should be as quick as possible but doesn't hang the whole system CPU and IO-wise, we should be able to cap how intensive the process is.
 
 # Definitions
 
