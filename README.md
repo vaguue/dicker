@@ -16,7 +16,7 @@ following the client:
 ```
 
 C++ SDK usage:
-```
+```cpp
 #include "dicker.h"
 
 int main() {
