@@ -9,6 +9,7 @@
 #include "compressor.h"
 #include "conn.h"
 #include "task.h"
+#include "storage.h"
 #include "worker.h"
 #include "affinity.h"
 
@@ -26,6 +27,7 @@ struct Config {
 
 struct Scheduler {
   Config cfg;
+  std::shared_ptr<Storage> storage;
   std::vector<fs::path> roots;
   std::vector<std::unique_ptr<Worker>> workers;
   std::vector<std::shared_ptr<StorageReader>> readers;
@@ -33,16 +35,16 @@ struct Scheduler {
   const uint32_t busyThreshold = 32;
 
   Scheduler(const Config& cfg) : cfg{cfg} {
-    // SPSC storage channels: each reader may be fed by exactly one worker, so
-    // there must be at least as many readers as workers (a reader is dedicated,
-    // not shared). diskConcurrency below workers cannot bound disk IO by sharing
-    // a reader queue — that needs a shared limiter, decided separately.
-    size_t readerCount = std::max(cfg.diskConcurrency, cfg.workers);
+    // One dedicated reader thread per worker (SPSC storage channels). Disk
+    // parallelism is bounded independently by the shared Storage semaphore
+    // (diskConcurrency), which the readers acquire before each read — so the
+    // thread count and the concurrent-read cap are decoupled.
+    this->storage = std::make_shared<Storage>(this->cfg.diskConcurrency);
 
-    readers.reserve(readerCount);
+    readers.reserve(this->cfg.workers);
 
-    for (size_t i = 0; i < readerCount; ++i) {
-      readers.emplace_back(std::make_shared<StorageReader>());
+    for (size_t i = 0; i < this->cfg.workers; ++i) {
+      readers.emplace_back(std::make_shared<StorageReader>(this->storage.get()));
     }
 
     workers.reserve(cfg.workers);
@@ -92,6 +94,12 @@ struct Scheduler {
   }
 
   void start() {
+    // One shadow copy over the backup volume, before any reads. Falls back to
+    // live reads if VSS is unavailable (see Storage::snapshot).
+    if (!this->roots.empty()) {
+      this->storage->snapshot(this->roots.front().string().c_str());
+    }
+
     for (auto& e : readers) {
       e->start();
     }

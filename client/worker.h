@@ -23,11 +23,9 @@
 
 using namespace dicker;
 
-const size_t MAX_BUF_SIZE = 256 * 1024;
-const size_t OUT_BUF_SIZE = MAX_BUF_SIZE + MAX_BUF_SIZE / 16 + 1024;
+const size_t OUT_BUF_SIZE = READ_BLOCK + READ_BLOCK / 16 + 1024;
 
 struct Worker : Chan<Worker, WorkerTask, 128> {
-  uint8_t inBuf[MAX_BUF_SIZE];
   uint8_t outBuf[OUT_BUF_SIZE];
 
   bool integrity = false;
@@ -109,33 +107,26 @@ struct Worker : Chan<Worker, WorkerTask, 128> {
       XXH64_reset(&checksum, 0);
     }
 
-    size_t remaining = t.length;
-    size_t fileOffset = t.offset;
+    this->storage->submit(t.type, t.pathname, t.offset, t.length);
 
-    while (remaining > 0) {
-      size_t want = std::min(remaining, MAX_BUF_SIZE);
-
-      StorageTask st { t.type, t.pathname, fileOffset, want, this->inBuf };
-
-      this->storage->await(st);
-
-      size_t& got = st.got;
-
-      if (got == 0) {
+    Filled fb;
+    while (this->storage->next(fb)) {
+      if (fb.eof) {
         break;
       }
 
+      uint8_t* data = this->storage->data(fb.idx);
+
       if (this->integrity) {
-        XXH64_update(&checksum, this->inBuf, got);
+        XXH64_update(&checksum, data, fb.len);
       }
 
-      size_t produced = this->compressor->update(this->inBuf, got, this->outBuf, OUT_BUF_SIZE);
+      size_t produced = this->compressor->update(data, fb.len, this->outBuf, OUT_BUF_SIZE);
       if (produced > 0) {
         this->sendBlock(this->outBuf, produced);
       }
 
-      remaining -= got;
-      fileOffset += got;
+      this->storage->recycle(fb.idx);
     }
 
     size_t flushed = this->compressor->flush(this->outBuf, OUT_BUF_SIZE);

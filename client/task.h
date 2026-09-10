@@ -33,25 +33,10 @@ struct WorkerTask : Task {
   }
 };
 
-struct StorageTask : Task {
-  uint8_t* buf = nullptr;
-  size_t got = 0;
+// A whole unit to read (file, or a chunk's byte range). The reader streams it
+// back through its own buffer ring, so no buffer or count travels on the task.
+struct ReadRequest : Task {
   Completion* completion = nullptr;
-
-  StorageTask() = default;
-
-  StorageTask(
-    dicker::UnitType type,
-    const char* path,
-    size_t offset,
-    size_t length,
-    uint8_t* buf,
-    Completion* completion = nullptr
-  ) : Task{type, {}, offset, length}, buf(buf), got(0), completion(completion)
-  {
-    std::strncpy(this->pathname, path, MAX_PATH - 1);
-    this->pathname[MAX_PATH - 1] = '\0';
-  }
 };
 
 // Owns its payload: the network sends on its own thread, so the bytes must
