@@ -6,12 +6,6 @@
 #include <cstddef>
 #include <utility>
 
-// Blocking single-producer / single-consumer ring, without an owned thread
-// (unlike Chan). Used to hand read-ahead buffers between the reader thread and
-// the worker thread. Same event-count wakeup discipline as Chan: a full/empty
-// ring sleeps on a gate that is bumped by both the data event and close(), and
-// every waiter rechecks its predicate after sampling the gate. Cap is a power
-// of two.
 template<typename T, size_t Cap>
 struct SpscRing {
   static constexpr size_t Mask = Cap - 1;
@@ -33,7 +27,6 @@ struct SpscRing {
     this->notFullGate.notify_all();
   }
 
-  // Producer. Blocks while full; returns false if the ring was closed.
   bool push(T v) {
     const size_t tl = this->tail.load(std::memory_order_relaxed);
 
@@ -60,8 +53,6 @@ struct SpscRing {
     return true;
   }
 
-  // Consumer. Blocks while empty; returns false once the ring is closed AND
-  // drained.
   bool pop(T& out) {
     const size_t hd = this->head.load(std::memory_order_relaxed);
 

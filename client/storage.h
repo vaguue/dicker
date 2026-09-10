@@ -6,7 +6,7 @@
 #include <cstddef>
 
 #ifdef _WIN32
-  #include <winsock2.h>   // must precede windows.h
+  #include <winsock2.h> // must precede windows.h
   #include <windows.h>
   #include <vss.h>
   #include <vswriter.h>
@@ -20,8 +20,7 @@
 struct Semaphore {
   std::atomic<int> permits;
 
-  explicit Semaphore(int n) : permits(n) {
-  }
+  explicit Semaphore(int n) : permits(n) {}
 
   void acquire() {
     for (;;) {
@@ -56,8 +55,8 @@ struct Storage {
   IVssBackupComponents* backup = nullptr;
   VSS_ID snapshotId{};
   bool active = false;
-  std::wstring volumeRoot;    // e.g. L"C:\\"
-  std::wstring deviceObject;  // e.g. L"\\\\?\\GLOBALROOT\\Device\\HarddiskVolumeShadowCopyN"
+  std::wstring volumeRoot; // e.g. L"C:\\"
+  std::wstring deviceObject; // e.g. L"\\\\?\\GLOBALROOT\\Device\\HarddiskVolumeShadowCopyN"
 #endif
 
   explicit Storage(size_t diskConcurrency)

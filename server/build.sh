@@ -13,6 +13,7 @@ MODS=../cxx_modules
 UV="$MODS/libuv"
 STD="-std=c++17"
 OPT="-O2"
+SEC="-ffunction-sections -fdata-sections"
 
 TARGET="$1"
 TARGETFLAG=""
@@ -28,6 +29,13 @@ case "$OSSEL" in
   *inux*) OS=linux ;;
   *)      OS=darwin ;;
 esac
+
+# dead-strip + symbol strip (ELF via lld: --gc-sections -s; mach-o: -dead_strip).
+if [ "$OS" = linux ]; then
+  SIZEOPT="-Wl,--gc-sections -s"
+else
+  SIZEOPT="-Wl,-dead_strip"
+fi
 
 mkdir -p "out/obj/$SUFFIX"
 
@@ -53,7 +61,7 @@ if [ ! -f "$UVLIB" ]; then
   OBJS=""
   for c in $SRC; do
     o="out/obj/$SUFFIX/uv_$(basename "${c%.c}").o"
-    zig cc $TARGETFLAG $OPT $UVDEF -I"$UV/include" -I"$UV/src" -c "$c" -o "$o"
+    zig cc $TARGETFLAG $OPT $SEC $UVDEF -I"$UV/include" -I"$UV/src" -c "$c" -o "$o"
     OBJS="$OBJS $o"
   done
   zig ar rcs "$UVLIB" $OBJS
@@ -66,12 +74,12 @@ if [ ! -f "$VLIB" ]; then
   OBJS=""
   for c in "$MODS"/lz4/lz4.c "$MODS"/lz4/lz4hc.c "$MODS"/lz4/lz4frame.c "$MODS"/lz4/xxhash.c; do
     o="out/obj/$SUFFIX/$(echo "$c" | sed 's#[./]#_#g').o"
-    zig cc $TARGETFLAG $OPT -I"$MODS"/lz4 -c "$c" -o "$o"
+    zig cc $TARGETFLAG $OPT $SEC -I"$MODS"/lz4 -c "$c" -o "$o"
     OBJS="$OBJS $o"
   done
   for c in $(ls "$MODS"/zstd/lib/common/*.c "$MODS"/zstd/lib/compress/*.c "$MODS"/zstd/lib/decompress/*.c); do
     o="out/obj/$SUFFIX/$(echo "$c" | sed 's#[./]#_#g').o"
-    zig cc $TARGETFLAG $OPT -DZSTD_DISABLE_ASM -I"$MODS"/zstd/lib -I"$MODS"/zstd/lib/common -c "$c" -o "$o"
+    zig cc $TARGETFLAG $OPT $SEC -DZSTD_DISABLE_ASM -I"$MODS"/zstd/lib -I"$MODS"/zstd/lib/common -c "$c" -o "$o"
     OBJS="$OBJS $o"
   done
   zig ar rcs "$VLIB" $OBJS
@@ -87,5 +95,5 @@ if [ "$OS" = linux ]; then
 fi
 
 echo "[*] linking out/dicker-server"
-zig c++ $TARGETFLAG $STD $OPT -Wall $INC $SOURCES "$UVLIB" "$VLIB" $SYSLIBS -o out/dicker-server
+zig c++ $TARGETFLAG $STD $OPT $SEC -Wall $INC $SOURCES "$UVLIB" "$VLIB" $SYSLIBS $SIZEOPT -o out/dicker-server
 echo "[+] built ./out/dicker-server"

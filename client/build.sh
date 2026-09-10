@@ -51,13 +51,13 @@ if [ ! -f "$LIBV" ]; then
 
   for c in "$MODS"/lz4/lz4.c "$MODS"/lz4/lz4hc.c "$MODS"/lz4/lz4frame.c "$MODS"/lz4/xxhash.c; do
     o="out/obj/$SUFFIX/$(echo "$c" | sed 's#[./]#_#g').o"
-    zig cc $TARGETFLAG $OPT -I"$MODS"/lz4 -c "$c" -o "$o"
+    zig cc $TARGETFLAG $OPT $SEC -I"$MODS"/lz4 -c "$c" -o "$o"
     OBJS="$OBJS $o"
   done
 
   for c in $(ls "$MODS"/zstd/lib/common/*.c "$MODS"/zstd/lib/compress/*.c "$MODS"/zstd/lib/decompress/*.c); do
     o="out/obj/$SUFFIX/$(echo "$c" | sed 's#[./]#_#g').o"
-    zig cc $TARGETFLAG $OPT -DZSTD_DISABLE_ASM -I"$MODS"/zstd/lib -I"$MODS"/zstd/lib/common -c "$c" -o "$o"
+    zig cc $TARGETFLAG $OPT $SEC -DZSTD_DISABLE_ASM -I"$MODS"/zstd/lib -I"$MODS"/zstd/lib/common -c "$c" -o "$o"
     OBJS="$OBJS $o"
   done
 
@@ -65,5 +65,5 @@ if [ ! -f "$LIBV" ]; then
 fi
 
 echo "[*] linking $OUT"
-zig c++ $TARGETFLAG $STD $OPT -Wall $INC main.cxx "$LIBV" $EXTRA_LIBS -o "$OUT"
+zig c++ $TARGETFLAG $STD $OPT $SEC -Wall $INC main.cxx "$LIBV" $EXTRA_LIBS $SIZEOPT -o "$OUT"
 echo "[+] built ./$OUT"

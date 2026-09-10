@@ -34,10 +34,6 @@ struct Scheduler {
   const uint32_t busyThreshold = 32;
 
   Scheduler(const Config& cfg) : cfg{cfg} {
-    // One dedicated reader thread per worker (SPSC storage channels). Disk
-    // parallelism is bounded independently by the shared Storage semaphore
-    // (diskConcurrency), which the readers acquire before each read — so the
-    // thread count and the concurrent-read cap are decoupled.
     this->storage = std::make_shared<Storage>(this->cfg.diskConcurrency);
 
     readers.reserve(this->cfg.workers);
@@ -101,8 +97,6 @@ struct Scheduler {
   }
 
   void start() {
-    // One shadow copy over the backup volume, before any reads. Falls back to
-    // live reads if VSS is unavailable (see Storage::snapshot).
     if (!this->roots.empty()) {
       this->storage->snapshot(this->roots.front().string().c_str());
     }
@@ -130,10 +124,6 @@ struct Scheduler {
       const std::string path = entry.path().string();
 
       if (size >= this->cfg.bigFileThreshold) {
-        // Split into fixed-size chunks and spread them round-robin across the
-        // workers (= connections). The server reassembles a chunk by pwrite at
-        // its offset, so chunks may travel on different connections and arrive
-        // out of order.
         const uint64_t chunkSize = this->cfg.chunkSize;
         size_t n = 0;
 

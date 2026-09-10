@@ -33,16 +33,12 @@ struct WorkerTask : Task {
   }
 };
 
-// A whole unit to read (file, or a chunk's byte range). The reader streams it
-// back through its own buffer ring, so no buffer or count travels on the task.
 struct ReadRequest : Task {
   Completion* completion = nullptr;
 };
 
-// Owns its payload: the network sends on its own thread, so the bytes must
-// outlive the caller's buffer. One heap copy per packet — deliberately simple.
 struct NetworkTask {
-  std::vector<uint8_t> data;
+  std::vector<uint8_t> data; //TODO no zero-alloc ;(
   Completion* completion = nullptr;
 
   NetworkTask() = default;

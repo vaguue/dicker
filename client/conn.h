@@ -78,6 +78,11 @@ inline Proxy parseProxy(const std::string& url) {
   return p;
 }
 
+// Built from a URL: Conn{"dicker://[sessionId:]secret@host:port?query"} with an
+// optional second SOCKS5 proxy URL. Scheme and userinfo are optional. The query
+// is &-separated named params: "integrity" (or integrity=1) sets the integrity
+// bit; "compressionAlgo=zstd|lz4|none" (alias "algo") picks the codec. An
+// explicit sessionId is raw bytes (<=16, zero-padded); otherwise it stays random.
 struct Conn {
   std::string host;
   std::string port;
@@ -86,91 +91,91 @@ struct Conn {
   uint8_t flags = 0;
   dicker::CompressionAlgo compressionAlgo = dicker::CompressionAlgo::Zstd;
   Proxy proxy = {};
-};
 
-// Parse "dicker://[sessionId:]secret@host:port?query". Scheme and userinfo are
-// optional. The query is &-separated named params: "integrity" (or integrity=1)
-// sets the integrity bit; "compressionAlgo=zstd|lz4|none" (alias "algo") picks
-// the codec. An explicit sessionId is raw bytes (<=16, zero-padded); otherwise
-// it keeps its random default.
-inline Conn parseConn(const std::string& url) {
-  Conn c;
+  Conn() = default;
 
-  std::string s = url;
-  if (auto scheme = s.find("://"); scheme != std::string::npos) {
-    s = s.substr(scheme + 3);
+  explicit Conn(const std::string& url, const std::string& proxyUrl = "") {
+    this->parse(url);
+    if (!proxyUrl.empty()) {
+      this->proxy = parseProxy(proxyUrl);
+    }
   }
 
-  std::string query;
-  if (auto q = s.find('?'); q != std::string::npos) {
-    query = s.substr(q + 1);
-    s = s.substr(0, q);
-  }
+  void parse(const std::string& url) {
+    std::string s = url;
+    if (auto scheme = s.find("://"); scheme != std::string::npos) {
+      s = s.substr(scheme + 3);
+    }
 
-  // userinfo before '@' is [sessionId:]secret, or just secret, or absent.
-  std::string hostport = s;
-  if (auto at = s.rfind('@'); at != std::string::npos) {
-    std::string userinfo = s.substr(0, at);
-    hostport = s.substr(at + 1);
+    std::string query;
+    if (auto q = s.find('?'); q != std::string::npos) {
+      query = s.substr(q + 1);
+      s = s.substr(0, q);
+    }
 
-    if (auto colon = userinfo.find(':'); colon != std::string::npos) {
-      std::string sid = userinfo.substr(0, colon);
-      c.key = userinfo.substr(colon + 1);
+    // userinfo before '@' is [sessionId:]secret, or just secret, or absent.
+    std::string hostport = s;
+    if (auto at = s.rfind('@'); at != std::string::npos) {
+      std::string userinfo = s.substr(0, at);
+      hostport = s.substr(at + 1);
 
-      if (!sid.empty()) {
-        c.sessionId = {};   // explicit id given: raw bytes, up to 16, zero-padded
-        for (std::size_t i = 0; i < sid.size() && i < c.sessionId.size(); i += 1) {
-          c.sessionId[i] = static_cast<std::uint8_t>(sid[i]);
+      if (auto colon = userinfo.find(':'); colon != std::string::npos) {
+        std::string sid = userinfo.substr(0, colon);
+        this->key = userinfo.substr(colon + 1);
+
+        if (!sid.empty()) {
+          this->sessionId = {};   // explicit id: raw bytes, up to 16, zero-padded
+          for (std::size_t i = 0; i < sid.size() && i < this->sessionId.size(); i += 1) {
+            this->sessionId[i] = static_cast<std::uint8_t>(sid[i]);
+          }
         }
       }
+      else {
+        this->key = userinfo;
+      }
+    }
+
+    if (auto colon = hostport.rfind(':'); colon != std::string::npos) {
+      this->host = hostport.substr(0, colon);
+      this->port = hostport.substr(colon + 1);
     }
     else {
-      c.key = userinfo;
+      this->host = hostport;
+    }
+
+    std::size_t start = 0;
+    while (start < query.size()) {
+      std::size_t amp = query.find('&', start);
+      std::string token = query.substr(start, amp == std::string::npos ? std::string::npos : amp - start);
+
+      std::string k = token;
+      std::string v;
+      if (auto eq = token.find('='); eq != std::string::npos) {
+        k = token.substr(0, eq);
+        v = token.substr(eq + 1);
+      }
+
+      if (k == "integrity") {
+        if (v.empty() || v == "1" || v == "true") {
+          this->flags |= static_cast<std::uint8_t>(dicker::HandshakeFlag::IntegrityChecks);
+        }
+      }
+      else if (k == "compressionAlgo" || k == "algo") {
+        if (v == "zstd") {
+          this->compressionAlgo = dicker::CompressionAlgo::Zstd;
+        }
+        else if (v == "lz4") {
+          this->compressionAlgo = dicker::CompressionAlgo::Lz4;
+        }
+        else if (v == "none") {
+          this->compressionAlgo = dicker::CompressionAlgo::None;
+        }
+      }
+
+      if (amp == std::string::npos) {
+        break;
+      }
+      start = amp + 1;
     }
   }
-
-  if (auto colon = hostport.rfind(':'); colon != std::string::npos) {
-    c.host = hostport.substr(0, colon);
-    c.port = hostport.substr(colon + 1);
-  }
-  else {
-    c.host = hostport;
-  }
-
-  std::size_t start = 0;
-  while (start < query.size()) {
-    std::size_t amp = query.find('&', start);
-    std::string token = query.substr(start, amp == std::string::npos ? std::string::npos : amp - start);
-
-    std::string k = token;
-    std::string v;
-    if (auto eq = token.find('='); eq != std::string::npos) {
-      k = token.substr(0, eq);
-      v = token.substr(eq + 1);
-    }
-
-    if (k == "integrity") {
-      if (v.empty() || v == "1" || v == "true") {
-        c.flags |= static_cast<std::uint8_t>(dicker::HandshakeFlag::IntegrityChecks);
-      }
-    }
-    else if (k == "compressionAlgo" || k == "algo") {
-      if (v == "zstd") {
-        c.compressionAlgo = dicker::CompressionAlgo::Zstd;
-      }
-      else if (v == "lz4") {
-        c.compressionAlgo = dicker::CompressionAlgo::Lz4;
-      }
-      else if (v == "none") {
-        c.compressionAlgo = dicker::CompressionAlgo::None;
-      }
-    }
-
-    if (amp == std::string::npos) {
-      break;
-    }
-    start = amp + 1;
-  }
-
-  return c;
-}
+};

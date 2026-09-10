@@ -111,7 +111,6 @@ inline void setBlocking(socket_t s, bool blocking) {
 #endif
 }
 
-// ── low-level helpers ──────────────────────────────────────────────────────────────────────────
 inline bool sendAll(socket_t s, const void* buf, size_t len) {
   const uint8_t* p = (const uint8_t*)buf;
   size_t off = 0;
@@ -143,8 +142,6 @@ inline bool recvExact(socket_t s, void* buf, size_t len) {
   return true;
 }
 
-// non-blocking connect with a bounded wait. A blocking connect() to a dead host hangs on the OS
-// default (~75s on Linux); this caps it at secs. Leaves the socket blocking on success.
 inline bool connectTimeout(socket_t s, const sockaddr* addr, socklen_t len, int secs) {
   setBlocking(s, false);
 
@@ -152,7 +149,7 @@ inline bool connectTimeout(socket_t s, const sockaddr* addr, socklen_t len, int 
 
   if (rc == 0) {
     setBlocking(s, true);
-    return true;                                         // connected immediately (e.g. localhost)
+    return true;
   }
 
 #ifdef _WIN32
@@ -171,7 +168,7 @@ inline bool connectTimeout(socket_t s, const sockaddr* addr, socklen_t len, int 
   rc = select((int)s + 1, nullptr, &wfds, nullptr, &tv);
 
   if (rc <= 0) {
-    return false;                                        // timeout (0) or select error (<0)
+    return false;
   }
 
   int err = 0;
@@ -184,15 +181,13 @@ inline bool connectTimeout(socket_t s, const sockaddr* addr, socklen_t len, int 
 #endif
 
   if (err != 0) {
-    return false;                                        // connect failed (refused / unreachable)
+    return false;
   }
 
   setBlocking(s, true);
   return true;
 }
 
-// open a raw TCP connection to host:port (no proxy). Tries every resolved address (v4 and v6) with
-// a per-attempt connect timeout. Returns net::INVALID on failure.
 inline socket_t tcpDial(const char* host, const char* port, int timeoutSecs = 10, bool nodelay = false) {
   init();
   addrinfo hints{};
@@ -222,7 +217,7 @@ inline socket_t tcpDial(const char* host, const char* port, int timeoutSecs = 10
       return fd;
     }
 
-    closeSock(fd);                                       // this address dead, try the next one
+    closeSock(fd);
   }
 
   std::cerr << "[!] connect fail " << host << ":" << port << "\n";
@@ -230,10 +225,7 @@ inline socket_t tcpDial(const char* host, const char* port, int timeoutSecs = 10
   return INVALID;
 }
 
-// SOCKS5 handshake over an already-connected proxy socket, CONNECTing to host:port (domain ATYP so
-// the proxy resolves DNS). RFC 1928 + RFC 1929 (user/pass). Returns true on GRANTED tunnel.
 inline bool socks5Connect(socket_t s, const Proxy& px, const char* host, const char* port) {
-  // greeting: offer no-auth (0x00) and user/pass (0x02)
   uint8_t greet[4] = {0x05, 0x02, 0x00, 0x02};
 
   if (!sendAll(s, greet, sizeof greet)) {
@@ -246,7 +238,7 @@ inline bool socks5Connect(socket_t s, const Proxy& px, const char* host, const c
     return false;
   }
 
-  if (sel[1] == 0x02) {                                  // username/password auth
+  if (sel[1] == 0x02) { // username/password auth
     std::vector<uint8_t> a;
 
     a.push_back(0x01);
@@ -266,7 +258,7 @@ inline bool socks5Connect(socket_t s, const Proxy& px, const char* host, const c
       return false;
     }
   }
-  else if (sel[1] != 0x00) {                           // 0xFF = no acceptable methods
+  else if (sel[1] != 0x00) { // 0xFF = no acceptable methods
     std::cerr << "[!] SOCKS5 no acceptable auth method (0x" << std::hex << (int)sel[1] << std::dec << ")\n";
     return false;
   }
@@ -302,16 +294,16 @@ inline bool socks5Connect(socket_t s, const Proxy& px, const char* host, const c
 
   size_t skip = 0;
   switch (rep[3]) {
-    case 0x01: skip = 4; break;                          // IPv4
-    case 0x04: skip = 16; break;                         // IPv6
-    case 0x03: { uint8_t l; if (!recvExact(s, &l, 1)) return false; skip = l; break; }  // domain
+    case 0x01: skip = 4; break; // IPv4
+    case 0x04: skip = 16; break; // IPv6
+    case 0x03: { uint8_t l; if (!recvExact(s, &l, 1)) return false; skip = l; break; } // domain
     default: return false;
   }
 
-  uint8_t drain[260];                                    // max domain 255 + 2-byte port
+  uint8_t drain[260]; // max domain 255 + 2-byte port
 
   if (!recvExact(s, drain, skip + 2)) {
-    return false;      // bound addr + 2-byte port
+    return false; // bound addr + 2-byte port
   }
 
   return true;

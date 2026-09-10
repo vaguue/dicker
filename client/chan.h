@@ -23,19 +23,6 @@ struct Completion {
   }
 };
 
-// Single-producer / single-consumer channel. One thread enqueues, the consumer
-// thread runs Impl::process on each item. Lock-free on the hot path: the
-// producer owns tail, the consumer owns head, both monotonic; a full/empty
-// channel sleeps instead of spinning. Cap must be a power of two.
-//
-// SPSC is a hard invariant: exactly one thread may call enqueue/tryEnqueue/await
-// on a given channel. Fan-in (several producers into one channel) is undefined.
-//
-// Blocking is done on two event-count gates rather than on head/tail directly:
-// atomic wait only rechecks the value it waits on, so waiting on tail would miss
-// a `stopped` flip (tail never moves on shutdown). Each gate is bumped by its
-// data event AND by stop, and every waiter rechecks its predicate after sampling
-// the gate, so there is no lost wakeup.
 template<typename Impl, typename Task, size_t Cap>
 struct Chan {
   static constexpr size_t Mask = Cap - 1;
@@ -131,9 +118,6 @@ struct Chan {
   }
 
   void run() {
-    // If Impl defines init(), run it once on this (the consumer) thread before
-    // consuming. This keeps everything Impl does — including producing into other
-    // channels — on a single thread, which is what SPSC requires.
     if constexpr (requires(Impl* self) { self->init(); }) {
       static_cast<Impl*>(this)->init();
     }

@@ -16,19 +16,16 @@
 #include "task.h"
 #include "storage.h"
 
-static constexpr size_t READ_BLOCK = 256 * 1024;  // read/compress granularity
-static constexpr size_t READ_AHEAD = 4;           // buffers filled ahead of the worker
-static constexpr size_t READ_RING = 8;            // power of two, > READ_AHEAD
+static constexpr size_t READ_BLOCK = 256 * 1024;
+static constexpr size_t READ_AHEAD = 4;
+static constexpr size_t READ_RING = 8;
 
-// One filled read-ahead buffer handed from the reader thread to the worker.
 struct Filled {
   uint32_t idx = 0;
   uint32_t len = 0;
   bool eof = false;
 };
 
-// 64-bit positioned file reads, no shared cursor. Opens the already-resolved
-// path (a shadow-copy device path when VSS is active).
 struct ReadFileHandle {
 #ifdef _WIN32
   HANDLE h = INVALID_HANDLE_VALUE;
@@ -95,17 +92,12 @@ struct ReadFileHandle {
 #endif
 };
 
-// One reader thread per worker (SPSC). The worker submits a whole unit; the
-// reader opens it once (through the shared snapshot + disk limiter) and streams
-// it into a small ring of buffers, reading ahead of the worker so the next
-// block is ready while the current one is compressed and sent. The whole file
-// (or the whole chunk range) is always read start-to-end sequentially.
 struct StorageReader : Chan<StorageReader, ReadRequest, 8> {
   Storage* storage;
 
   uint8_t bufs[READ_AHEAD][READ_BLOCK];
-  SpscRing<uint32_t, READ_RING> spare;  // worker -> reader: free buffer indices
-  SpscRing<Filled, READ_RING> ready;    // reader -> worker: filled buffers
+  SpscRing<uint32_t, READ_RING> spare;
+  SpscRing<Filled, READ_RING> ready;
 
   explicit StorageReader(Storage* storage) : storage{storage} {
     for (uint32_t i = 0; i < READ_AHEAD; i += 1) {
@@ -114,12 +106,10 @@ struct StorageReader : Chan<StorageReader, ReadRequest, 8> {
   }
 
   ~StorageReader() {
-    // Unblock the reader if it is parked waiting for a buffer during shutdown.
     this->spare.close();
     this->ready.close();
   }
 
-  // Reader thread: read one unit ahead into the ring, then mark end-of-unit.
   void process(ReadRequest& req) {
     std::string resolved = this->storage->resolve(req.pathname);
 
@@ -155,7 +145,6 @@ struct StorageReader : Chan<StorageReader, ReadRequest, 8> {
     this->ready.push(Filled{0, 0, true});
   }
 
-  // Worker thread interface.
   void submit(dicker::UnitType type, const char* path, uint64_t offset, uint64_t length) {
     ReadRequest req;
     req.type = type;
