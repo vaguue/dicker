@@ -1,6 +1,8 @@
 #pragma once
 
 #include <set>
+#include <string>
+#include <vector>
 #include <memory>
 #include <algorithm>
 #include <filesystem>
@@ -12,9 +14,31 @@
 #include "storage.h"
 #include "worker.h"
 #include "affinity.h"
+#include "glob.h"
 
 namespace dicker {
 namespace fs = std::filesystem;
+
+// A backup root plus optional glob filters. include: if non-empty, only files
+// matching one of these are uploaded. exclude: files/dirs matching one of these
+// are skipped — and a matching directory is pruned (not descended into), so e.g.
+// the media cache is never even walked. Patterns are matched (glob::fnmatch,
+// where '*' spans '/') against both the root-relative path and the basename.
+struct Root {
+  fs::path path;
+  std::vector<std::string> include;
+  std::vector<std::string> exclude;
+};
+
+inline bool matchesAny(const std::string& rel, const std::string& name,
+                       const std::vector<std::string>& patterns) {
+  for (const std::string& p : patterns) {
+    if (glob::fnmatch(rel, p) || glob::fnmatch(name, p)) {
+      return true;
+    }
+  }
+  return false;
+}
 
 struct Config {
   Conn conn;
@@ -28,7 +52,7 @@ struct Config {
 struct Scheduler {
   Config cfg;
   std::shared_ptr<Storage> storage;
-  std::vector<fs::path> roots;
+  std::vector<Root> roots;
   std::vector<std::unique_ptr<Worker>> workers;
   std::vector<std::shared_ptr<StorageReader>> readers;
 
@@ -54,8 +78,10 @@ struct Scheduler {
     }
   }
 
-  void addRoot(fs::path p) {
-    roots.push_back(p);
+  void addRoot(fs::path p,
+               std::vector<std::string> include = {},
+               std::vector<std::string> exclude = {}) {
+    this->roots.push_back({ std::move(p), std::move(include), std::move(exclude) });
   }
 
   size_t selectWorker(AffinityKey incoming) {
@@ -99,7 +125,7 @@ struct Scheduler {
 
   void start() {
     if (!this->roots.empty()) {
-      this->storage->snapshot(this->roots.front().string().c_str());
+      this->storage->snapshot(this->roots.front().path.string().c_str());
     }
 
     for (auto& e : readers) {
@@ -115,13 +141,39 @@ struct Scheduler {
     }
   }
 
-  void run(fs::path root) {
-    for (const auto& entry : fs::recursive_directory_iterator(root)) {
-      if (!entry.is_regular_file()) {
+  void run(const Root& root) {
+    std::error_code ec;
+    auto it = fs::recursive_directory_iterator(
+      root.path, fs::directory_options::skip_permission_denied, ec);
+    const auto end = fs::recursive_directory_iterator();
+
+    for (; !ec && it != end; it.increment(ec)) {
+      const fs::directory_entry& entry = *it;
+      const std::string rel = fs::relative(entry.path(), root.path).generic_string();
+      const std::string name = entry.path().filename().string();
+
+      if (entry.is_directory(ec)) {
+        // prune an excluded directory: skip its whole subtree (e.g. media cache)
+        if (matchesAny(rel, name, root.exclude)) {
+          it.disable_recursion_pending();
+        }
         continue;
       }
 
-      const uint64_t size = entry.file_size();
+      if (!entry.is_regular_file(ec)) {
+        continue;
+      }
+      if (matchesAny(rel, name, root.exclude)) {
+        continue;
+      }
+      if (!root.include.empty() && !matchesAny(rel, name, root.include)) {
+        continue;
+      }
+
+      const uint64_t size = entry.file_size(ec);
+      if (ec) {
+        continue;
+      }
       const std::string path = entry.path().string();
 
       if (size >= this->cfg.bigFileThreshold) {

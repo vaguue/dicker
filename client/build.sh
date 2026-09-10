@@ -16,7 +16,7 @@ MODS=../cxx_modules
 STD="-std=c++20"
 OPT="-O2"
 SEC="-ffunction-sections -fdata-sections"   # let the linker drop unused code
-INC="-I. -I../shared -I$MODS/lz4 -I$MODS/zstd/lib"
+INC="-I. -I../shared -I$MODS -I$MODS/lz4 -I$MODS/zstd/lib"
 
 TARGET="$1"
 TARGETFLAG=""
@@ -66,5 +66,5 @@ if [ ! -f "$LIBV" ]; then
 fi
 
 echo "[*] linking $OUT"
-zig c++ $TARGETFLAG $STD $OPT $SEC -Wall $INC main.cxx "$LIBV" $EXTRA_LIBS $SIZEOPT -o "$OUT"
+zig c++ $TARGETFLAG $STD $OPT $SEC -Wall $INC cli.cxx "$LIBV" $EXTRA_LIBS $SIZEOPT -o "$OUT"
 echo "[+] built ./$OUT"
