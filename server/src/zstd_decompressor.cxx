@@ -1,4 +1,4 @@
-#include "decompressor_impl.hpp"
+#include "decompressor_impl.h"
 
 #include <vector>
 #include <zstd.h>

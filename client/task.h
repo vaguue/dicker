@@ -5,7 +5,7 @@
 #include <cstddef>
 #include <vector>
 
-#include "protocol.hpp"
+#include "protocol.h"
 #include "chan.h"
 
 const size_t MAX_PATH = 256;

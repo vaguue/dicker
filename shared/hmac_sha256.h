@@ -4,7 +4,7 @@
 #include <cstddef>
 #include <array>
 #include <cstring>
-#include "sha256.hpp"
+#include "sha256.h"
 
 namespace dicker::crypto {
 

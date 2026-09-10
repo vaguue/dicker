@@ -1,4 +1,4 @@
-#include "file_sink.hpp"
+#include "file_sink.h"
 
 #include <algorithm>
 #include <cctype>

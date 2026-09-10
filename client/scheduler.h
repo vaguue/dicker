@@ -5,7 +5,7 @@
 #include <algorithm>
 #include <filesystem>
 
-#include "protocol.hpp"
+#include "protocol.h"
 #include "compressor.h"
 #include "conn.h"
 #include "task.h"
@@ -22,8 +22,6 @@ struct Config {
   size_t workers = 4;
   size_t bigFileThreshold = 256 * 1024 * 1024;
   size_t chunkSize = 64 * 1024 * 1024;
-
-  dicker::CompressionAlgo compressionAlgo = dicker::CompressionAlgo::Zstd;
 };
 
 struct Scheduler {
@@ -52,7 +50,7 @@ struct Scheduler {
 
     for (size_t i = 0; i < cfg.workers; ++i) {
       workers.emplace_back(std::make_unique<Worker>(
-        makeCompressor(cfg.compressionAlgo),
+        makeCompressor(cfg.conn.compressionAlgo),
         readers[i],
         cfg.conn)
       );

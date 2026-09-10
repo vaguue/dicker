@@ -3,7 +3,7 @@
 #include <cstdint>
 #include <cstddef>
 #include <memory>
-#include "protocol.hpp"
+#include "protocol.h"
 
 namespace dicker {
 

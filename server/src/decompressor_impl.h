@@ -1,7 +1,7 @@
 #pragma once
 
 #include <memory>
-#include "decompressor.hpp"
+#include "decompressor.h"
 
 namespace dicker {
 

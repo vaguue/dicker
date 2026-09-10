@@ -9,7 +9,7 @@
 #include <unordered_map>
 #include <filesystem>
 #include <uv.h>
-#include "protocol.hpp"
+#include "protocol.h"
 
 namespace dicker {
 

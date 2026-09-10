@@ -1,8 +1,8 @@
-#include "server.hpp"
+#include "server.h"
 
-#include "connection.hpp"
-#include "file_sink.hpp"
-#include "handshake.hpp"
+#include "connection.h"
+#include "file_sink.h"
+#include "handshake.h"
 
 namespace dicker {
 

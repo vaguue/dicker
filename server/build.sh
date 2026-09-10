@@ -40,15 +40,15 @@ case "$LDFLAGS" in
   *) LDFLAGS="$LDFLAGS -lzstd" ;;
 esac
 
-SOURCES="src/main.cpp \
-  src/server.cpp \
-  src/connection.cpp \
-  src/byte_channel.cpp \
-  src/file_sink.cpp \
-  src/handshake.cpp \
-  src/decompressor.cpp \
-  src/lz4_decompressor.cpp \
-  src/zstd_decompressor.cpp"
+SOURCES="src/main.cxx \
+  src/server.cxx \
+  src/connection.cxx \
+  src/byte_channel.cxx \
+  src/file_sink.cxx \
+  src/handshake.cxx \
+  src/decompressor.cxx \
+  src/lz4_decompressor.cxx \
+  src/zstd_decompressor.cxx"
 
 mkdir -p out
 

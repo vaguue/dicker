@@ -9,7 +9,7 @@
 #include <zstd.h>
 #include <lz4frame.h>
 
-#include "protocol.hpp"
+#include "protocol.h"
 
 using namespace dicker;
 

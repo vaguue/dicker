@@ -1,4 +1,4 @@
-#include "byte_channel.hpp"
+#include "byte_channel.h"
 
 #include <cstring>
 

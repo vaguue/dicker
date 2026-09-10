@@ -343,7 +343,7 @@ struct NetworkClient : Chan<NetworkClient, NetworkTask, 32> {
   net::socket_t fd = net::INVALID;
 
   void init(const Conn& conn) {
-    this->fd = net::tcpConnect(conn.host, conn.port, conn.proxy);
+    this->fd = net::tcpConnect(conn.host.c_str(), conn.port.c_str(), conn.proxy);
 
     if (!net::isValid(this->fd)) {
       throw std::runtime_error{"failed to connect to server"};

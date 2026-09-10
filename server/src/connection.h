@@ -2,13 +2,14 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <string>
 #include <vector>
 #include <thread>
 #include <memory>
 #include <uv.h>
-#include "protocol.hpp"
-#include "byte_channel.hpp"
-#include "decompressor.hpp"
+#include "protocol.h"
+#include "byte_channel.h"
+#include "decompressor.h"
 
 namespace dicker {
 
@@ -58,6 +59,11 @@ namespace dicker {
     std::unique_ptr<StreamDecompressor> decompressor_;
     std::shared_ptr<FileSink> sink_;
     bool integrity_checks_;
+
+    std::string peer_;          // logging: "ip:port" of the client
+    std::string session_hex_;   // logging: session id once handshaken
+    std::uint64_t units_done_;  // logging: units fully received
+    std::uint64_t bytes_total_; // logging: decompressed bytes written
 
     bool paused_;
     bool consumer_started_;

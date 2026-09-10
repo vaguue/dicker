@@ -1,5 +1,5 @@
-#include "decompressor.hpp"
-#include "decompressor_impl.hpp"
+#include "decompressor.h"
+#include "decompressor_impl.h"
 
 namespace dicker {
 

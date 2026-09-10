@@ -1,8 +1,8 @@
-#include "handshake.hpp"
+#include "handshake.h"
 
 #include <cstring>
-#include "wire.hpp"
-#include "hmac_sha256.hpp"
+#include "wire.h"
+#include "hmac_sha256.h"
 
 namespace dicker {
 

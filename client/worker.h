@@ -11,9 +11,9 @@
 #define XXH_INLINE_ALL
 #include "xxhash.h"
 
-#include "protocol.hpp"
-#include "wire.hpp"
-#include "hmac_sha256.hpp"
+#include "protocol.h"
+#include "wire.h"
+#include "hmac_sha256.h"
 
 #include "net.h"
 #include "task.h"

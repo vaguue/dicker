@@ -1,20 +1,65 @@
-#include "connection.hpp"
+#include "connection.h"
 
 #define XXH_INLINE_ALL
 #include "xxhash.h"
 
 #include <cstdlib>
+#include <cstdio>
 #include <cstring>
 #include <string>
 #include <vector>
-#include "wire.hpp"
-#include "handshake.hpp"
-#include "file_sink.hpp"
-#include "server.hpp"
+#include <arpa/inet.h>
+#include "wire.h"
+#include "handshake.h"
+#include "file_sink.h"
+#include "server.h"
 
 namespace dicker {
 
   namespace {
+
+    const char* status_name(HandshakeStatus status) {
+      switch (status) {
+        case HandshakeStatus::Ok: return "ok";
+        case HandshakeStatus::BadMagic: return "bad-magic";
+        case HandshakeStatus::BadVersion: return "bad-version";
+        case HandshakeStatus::AuthFailed: return "auth-failed";
+        case HandshakeStatus::BadAlgo: return "bad-algo";
+        case HandshakeStatus::ServerError: return "server-error";
+      }
+      return "?";
+    }
+
+    const char* algo_name(CompressionAlgo algo) {
+      switch (algo) {
+        case CompressionAlgo::None: return "none";
+        case CompressionAlgo::Lz4: return "lz4";
+        case CompressionAlgo::Zstd: return "zstd";
+      }
+      return "?";
+    }
+
+    std::string peer_address(uv_tcp_t* tcp) {
+      struct sockaddr_storage addr;
+      int len = sizeof(addr);
+      char text[128] = {0};
+      if (uv_tcp_getpeername(tcp, reinterpret_cast<struct sockaddr*>(&addr), &len) == 0) {
+        char ip[INET6_ADDRSTRLEN] = {0};
+        int port = 0;
+        if (addr.ss_family == AF_INET) {
+          auto* v4 = reinterpret_cast<struct sockaddr_in*>(&addr);
+          uv_ip4_name(v4, ip, sizeof(ip));
+          port = ntohs(v4->sin_port);
+        }
+        else if (addr.ss_family == AF_INET6) {
+          auto* v6 = reinterpret_cast<struct sockaddr_in6*>(&addr);
+          uv_ip6_name(v6, ip, sizeof(ip));
+          port = ntohs(v6->sin6_port);
+        }
+        std::snprintf(text, sizeof(text), "%s:%d", ip, port);
+      }
+      return std::string(text);
+    }
 
     struct ReplyWrite {
       uv_write_t request;
@@ -55,6 +100,8 @@ namespace dicker {
       state_(State::Handshaking),
       channel_(server->config().channel_low_water, [this]() { uv_async_send(&resume_async_); }),
       integrity_checks_(false),
+      units_done_(0),
+      bytes_total_(0),
       paused_(false),
       consumer_started_(false),
       teardown_started_(false),
@@ -76,6 +123,9 @@ namespace dicker {
       connection->begin_teardown();
       return;
     }
+
+    connection->peer_ = peer_address(&connection->tcp_);
+    std::fprintf(stderr, "conn accepted from %s\n", connection->peer_.c_str());
 
     uv_read_start(reinterpret_cast<uv_stream_t*>(&connection->tcp_), alloc_cb, on_read);
   }
@@ -136,10 +186,16 @@ namespace dicker {
 
     send_handshake_reply(status);
     if (status != HandshakeStatus::Ok) {
+      std::fprintf(stderr, "handshake rejected from %s: %s\n",
+                   peer_.c_str(), status_name(status));
       return;
     }
 
     integrity_checks_ = has_flag(request.flags, HandshakeFlag::IntegrityChecks);
+    session_hex_ = session_id_to_hex(request.session_id);
+    std::fprintf(stderr, "handshake ok from %s session=%s algo=%s integrity=%d\n",
+                 peer_.c_str(), session_hex_.c_str(), algo_name(request.algo),
+                 integrity_checks_ ? 1 : 0);
     state_ = State::Streaming;
 
     std::vector<std::uint8_t> leftover(handshake_buffer_.begin() + kHandshakeRequestSize,
@@ -230,17 +286,31 @@ namespace dicker {
         base_offset = read_u64_le(offset_bytes);
       }
 
+      if (type == UnitType::Chunk) {
+        std::fprintf(stderr, "recv chunk session=%s path=%s offset=%llu\n",
+                     session_hex_.c_str(), path.c_str(),
+                     static_cast<unsigned long long>(base_offset));
+      }
+      else {
+        std::fprintf(stderr, "recv file session=%s path=%s\n",
+                     session_hex_.c_str(), path.c_str());
+      }
+
       SequentialWriter sequential;
       OffsetWriter offset;
       if (type == UnitType::File) {
         sequential = sink_->open_sequential(path);
         if (!sequential.valid()) {
+          std::fprintf(stderr, "reject session=%s path=%s (open failed / not permitted)\n",
+                       session_hex_.c_str(), path.c_str());
           break;
         }
       }
       else {
         offset = sink_->open_offset(path);
         if (!offset.valid()) {
+          std::fprintf(stderr, "reject session=%s path=%s (open failed / not permitted)\n",
+                       session_hex_.c_str(), path.c_str());
           break;
         }
       }
@@ -294,6 +364,8 @@ namespace dicker {
         }
 
         if (!decompressor_->decompress(input_buffer.data(), block_len, unit_sink)) {
+          std::fprintf(stderr, "decode error session=%s path=%s\n",
+                       session_hex_.c_str(), path.c_str());
           unit_ok = false;
           break;
         }
@@ -305,6 +377,8 @@ namespace dicker {
           unit_ok = false;
         }
         else if (read_u64_le(checksum_bytes) != XXH64_digest(&checksum_state)) {
+          std::fprintf(stderr, "checksum mismatch session=%s path=%s\n",
+                       session_hex_.c_str(), path.c_str());
           unit_ok = false;
         }
       }
@@ -316,6 +390,12 @@ namespace dicker {
       if (!unit_ok || !unit_done) {
         break;
       }
+
+      units_done_ += 1;
+      bytes_total_ += unit_sink.running;
+      std::fprintf(stderr, "ok session=%s path=%s bytes=%llu\n",
+                   session_hex_.c_str(), path.c_str(),
+                   static_cast<unsigned long long>(unit_sink.running));
     }
 
     uv_async_send(&close_async_);
@@ -368,6 +448,11 @@ namespace dicker {
       if (connection->consumer_started_ && connection->consumer_.joinable()) {
         connection->consumer_.join();
       }
+      std::fprintf(stderr, "conn closed %s session=%s units=%llu bytes=%llu\n",
+                   connection->peer_.c_str(),
+                   connection->session_hex_.empty() ? "-" : connection->session_hex_.c_str(),
+                   static_cast<unsigned long long>(connection->units_done_),
+                   static_cast<unsigned long long>(connection->bytes_total_));
       delete connection;
     }
   }
