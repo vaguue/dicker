@@ -7,11 +7,11 @@ A lightweight tool and SDK to transfer your files as fast as possible. This repo
 
 ## Usage 
 The repo consists of server and client, running a server is as simple as
-```
+```bash
 DICKER_SECRET=dicker-secret ./dicker-server --root /tmp
 ```
 following the client:
-```
+```bash
 ./dicker dicker://dicker-secret@1.2.3.4:5959 file-or-directory-1 file-or-directory-2
 ```
 
