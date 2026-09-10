@@ -94,6 +94,9 @@ if [ "$OS" = linux ]; then
   SYSLIBS="$SYSLIBS -ldl -lrt"
 fi
 
-echo "[*] linking out/dicker-server"
-zig c++ $TARGETFLAG $STD $OPT $SEC -Wall $INC $SOURCES "$UVLIB" "$VLIB" $SYSLIBS $SIZEOPT -o out/dicker-server
-echo "[+] built ./out/dicker-server"
+SRVOUT="out/dicker-server"
+[ -n "$TARGET" ] && SRVOUT="out/dicker-server-$SUFFIX"   # cross builds never clobber the host binary
+
+echo "[*] linking $SRVOUT"
+zig c++ $TARGETFLAG $STD $OPT $SEC -Wall $INC $SOURCES "$UVLIB" "$VLIB" $SYSLIBS $SIZEOPT -o "$SRVOUT"
+echo "[+] built ./$SRVOUT"

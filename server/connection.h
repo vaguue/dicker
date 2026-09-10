@@ -64,6 +64,7 @@ namespace dicker {
     std::string session_hex_;   // logging: session id once handshaken
     std::uint64_t units_done_;  // logging: units fully received
     std::uint64_t bytes_total_; // logging: decompressed bytes written
+    std::uint64_t wire_bytes_;  // logging: compressed bytes received on the socket
 
     bool paused_;
     bool consumer_started_;

@@ -102,6 +102,7 @@ namespace dicker {
       integrity_checks_(false),
       units_done_(0),
       bytes_total_(0),
+      wire_bytes_(0),
       paused_(false),
       consumer_started_(false),
       teardown_started_(false),
@@ -154,6 +155,7 @@ namespace dicker {
       handle_handshake_data(data, len);
     }
     else if (state_ == State::Streaming) {
+      wire_bytes_ += len;
       channel_.push(data, len);
       apply_backpressure();
     }
@@ -448,11 +450,17 @@ namespace dicker {
       if (connection->consumer_started_ && connection->consumer_.joinable()) {
         connection->consumer_.join();
       }
-      std::fprintf(stderr, "conn closed %s session=%s units=%llu bytes=%llu\n",
+      double ratio = connection->wire_bytes_ > 0
+        ? static_cast<double>(connection->bytes_total_) / static_cast<double>(connection->wire_bytes_)
+        : 0.0;
+      std::fprintf(stderr,
+                   "conn closed %s session=%s units=%llu bytes=%llu wire=%llu ratio=%.2fx\n",
                    connection->peer_.c_str(),
                    connection->session_hex_.empty() ? "-" : connection->session_hex_.c_str(),
                    static_cast<unsigned long long>(connection->units_done_),
-                   static_cast<unsigned long long>(connection->bytes_total_));
+                   static_cast<unsigned long long>(connection->bytes_total_),
+                   static_cast<unsigned long long>(connection->wire_bytes_),
+                   ratio);
       delete connection;
     }
   }

@@ -34,10 +34,11 @@ case "${TARGET:-$(uname -s)}" in
 esac
 
 OUT="out/dicker"
+[ -n "$TARGET" ] && OUT="out/dicker-$SUFFIX"   # cross builds never clobber the host binary
 EXTRA_LIBS=""
 case "$TARGET" in
   *windows*)
-    OUT="out/dicker.exe"
+    OUT="$OUT.exe"
     EXTRA_LIBS="-lws2_32 -lvssapi -lole32 -loleaut32"
     ;;
 esac
