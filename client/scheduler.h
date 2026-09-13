@@ -4,6 +4,8 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <regex>
+#include <cstring>
 #include <algorithm>
 #include <filesystem>
 
@@ -14,31 +16,105 @@
 #include "storage.h"
 #include "worker.h"
 #include "affinity.h"
-#include "glob.h"
 
 namespace dicker {
 namespace fs = std::filesystem;
 
-// A backup root plus optional glob filters. include: if non-empty, only files
-// matching one of these are uploaded. exclude: files/dirs matching one of these
-// are skipped — and a matching directory is pruned (not descended into), so e.g.
-// the media cache is never even walked. Patterns are matched (glob::fnmatch,
-// where '*' spans '/') against both the root-relative path and the basename.
-struct Root {
-  fs::path path;
-  std::vector<std::string> include;
-  std::vector<std::string> exclude;
+// rsync-style path filter: an ordered list of include/exclude rules; the FIRST
+// rule that matches a path decides; no match => included. Semantics mirror rsync
+// so unix users aren't surprised:
+//   *            matches within a path segment (does not cross '/')
+//   **           matches across '/'
+//   ?            one non-'/' char
+//   leading '/'  anchors the pattern to the root
+//   trailing '/' matches directories only
+//   no '/' in the pattern => matched against the basename at any depth
+// To keep one file inside an otherwise-excluded dir, exclude the dir's CONTENTS
+// (dir/**) — not the dir (dir/) — and put the re-include BEFORE it, e.g.
+//   include "media_cache/version"  then  exclude "media_cache/**".
+// Excluding the directory itself (dir/ or bare dir) prunes it (never walked).
+struct FilterRule {
+  bool include;
+  std::string pattern;
 };
 
-inline bool matchesAny(const std::string& rel, const std::string& name,
-                       const std::vector<std::string>& patterns) {
-  for (const std::string& p : patterns) {
-    if (glob::fnmatch(rel, p) || glob::fnmatch(name, p)) {
-      return true;
+// Sugar so callers write ordered rules readably:
+//   addRoot(path, { include("media_cache/version"), exclude("media_cache/**") });
+inline FilterRule include(std::string pattern) { return FilterRule{ true, std::move(pattern) }; }
+inline FilterRule exclude(std::string pattern) { return FilterRule{ false, std::move(pattern) }; }
+
+struct Rule {
+  bool include;
+  bool dirOnly;
+  bool basenameOnly;
+  std::regex re;
+};
+
+inline Rule compileRule(const FilterRule& fr) {
+  std::string pat = fr.pattern;
+  Rule rule;
+  rule.include = fr.include;
+  rule.dirOnly = false;
+
+  if (!pat.empty() && pat.back() == '/') {
+    rule.dirOnly = true;
+    pat.pop_back();
+  }
+  bool anchored = false;
+  if (!pat.empty() && pat.front() == '/') {
+    anchored = true;
+    pat.erase(0, 1);
+  }
+  rule.basenameOnly =
+    pat.find('/') == std::string::npos && pat.find("**") == std::string::npos;
+
+  std::string re;
+  for (std::size_t i = 0; i < pat.size();) {
+    char c = pat[i];
+    if (c == '*' && i + 1 < pat.size() && pat[i + 1] == '*') {
+      re += ".*";        // ** crosses '/'
+      i += 2;
+    }
+    else if (c == '*') {
+      re += "[^/]*";     // * stays within a segment
+      i += 1;
+    }
+    else if (c == '?') {
+      re += "[^/]";
+      i += 1;
+    }
+    else {
+      if (std::strchr(".^$+{}()[]|\\", c) != nullptr) {
+        re += '\\';
+      }
+      re += c;
+      i += 1;
     }
   }
-  return false;
+
+  const std::string full = (rule.basenameOnly || anchored) ? re : ("(.*/)?" + re);
+  rule.re = std::regex("^" + full + "$");
+  return rule;
 }
+
+// First-match-wins; default keep.
+inline bool keep(const std::vector<Rule>& rules, const std::string& rel,
+                 const std::string& name, bool isDir) {
+  for (const Rule& r : rules) {
+    if (r.dirOnly && !isDir) {
+      continue;
+    }
+    if (std::regex_match(r.basenameOnly ? name : rel, r.re)) {
+      return r.include;
+    }
+  }
+  return true;
+}
+
+struct Root {
+  fs::path path;
+  std::vector<Rule> rules;
+};
 
 struct Config {
   Conn conn;
@@ -78,10 +154,14 @@ struct Scheduler {
     }
   }
 
-  void addRoot(fs::path p,
-               std::vector<std::string> include = {},
-               std::vector<std::string> exclude = {}) {
-    this->roots.push_back({ std::move(p), std::move(include), std::move(exclude) });
+  void addRoot(fs::path p, std::vector<FilterRule> rules = {}) {
+    Root root;
+    root.path = std::move(p);
+    root.rules.reserve(rules.size());
+    for (const FilterRule& fr : rules) {
+      root.rules.push_back(compileRule(fr));
+    }
+    this->roots.push_back(std::move(root));
   }
 
   size_t selectWorker(AffinityKey incoming) {
@@ -153,8 +233,9 @@ struct Scheduler {
       const std::string name = entry.path().filename().string();
 
       if (entry.is_directory(ec)) {
-        // prune an excluded directory: skip its whole subtree (e.g. media cache)
-        if (matchesAny(rel, name, root.exclude)) {
+        // an excluded directory is pruned (never descended); a dir whose contents
+        // are excluded via dir/** is not matched here, so we still walk it.
+        if (!keep(root.rules, rel, name, true)) {
           it.disable_recursion_pending();
         }
         continue;
@@ -163,10 +244,7 @@ struct Scheduler {
       if (!entry.is_regular_file(ec)) {
         continue;
       }
-      if (matchesAny(rel, name, root.exclude)) {
-        continue;
-      }
-      if (!root.include.empty() && !matchesAny(rel, name, root.include)) {
+      if (!keep(root.rules, rel, name, false)) {
         continue;
       }
 

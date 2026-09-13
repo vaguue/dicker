@@ -41,8 +41,7 @@ std::size_t parseSize(const char* s) {
 
 struct PendingRoot {
   std::string path;
-  std::vector<std::string> include;
-  std::vector<std::string> exclude;
+  std::vector<dicker::FilterRule> rules;   // ordered: rsync first-match-wins
 };
 
 }  // namespace
@@ -74,14 +73,14 @@ int main(int argc, char** argv) {
     const char* val = argv[i + 1];
 
     if (arg == "--root") {
-      roots.push_back(PendingRoot{val, {}, {}});
+      roots.push_back(PendingRoot{val, {}});
     }
     else if (arg == "--include" || arg == "--exclude") {
       if (roots.empty()) {
         std::fprintf(stderr, "%s must follow a --root\n", arg.c_str());
         return 2;
       }
-      (arg == "--include" ? roots.back().include : roots.back().exclude).push_back(val);
+      roots.back().rules.push_back(dicker::FilterRule{ arg == "--include", val });
     }
     else if (arg == "--workers") {
       cfg.workers = std::strtoul(val, nullptr, 10);
@@ -113,7 +112,7 @@ int main(int argc, char** argv) {
 
   dicker::Scheduler dicker{cfg};
   for (const PendingRoot& r : roots) {
-    dicker.addRoot(r.path, r.include, r.exclude);
+    dicker.addRoot(r.path, r.rules);
   }
   dicker.start();
   return 0;
