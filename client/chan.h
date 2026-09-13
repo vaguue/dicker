@@ -107,14 +107,16 @@ struct Chan {
   }
 
   bool await(Task t) {
-    Completion c;
-    t.completion = &c;
+    auto c = std::make_shared<Completion>();
+
+    t.completion = c;
 
     if (!this->enqueue(std::move(t))) {
       return false;
     }
 
-    c.wait();
+    c->wait();
+
     return true;
   }
 

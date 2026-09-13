@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdio>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -99,17 +100,22 @@ inline void applyNoSigpipe(socket_t s) {
 #endif
 }
 
-inline void setBlocking(socket_t s, bool blocking) {
+inline bool setBlocking(socket_t s, bool blocking) {
 #ifdef _WIN32
   u_long mode = blocking ? 0 : 1;
-  ioctlsocket(s, FIONBIO, &mode);
+  if (ioctlsocket(s, FIONBIO, &mode) == SOCKET_ERROR) {
+    std::cerr << "[!] ioctlsocket failed, err=" << WSAGetLastError() << "\n";
+    return false;
+  }
 #else
   int fl = fcntl(s, F_GETFL, 0);
-  if (fl < 0) {
-    return;
+  if (fl < 0) return false;
+  if (fcntl(s, F_SETFL, blocking ? (fl & ~O_NONBLOCK) : (fl | O_NONBLOCK)) < 0) {
+    std::cerr << "[!] fcntl failed, err=" << errno << "\n";
+    return false;
   }
-  fcntl(s, F_SETFL, blocking ? (fl & ~O_NONBLOCK) : (fl | O_NONBLOCK));
 #endif
+  return true;
 }
 
 inline bool sendAll(socket_t s, const void* buf, size_t len) {
@@ -166,7 +172,11 @@ inline bool connectTimeout(socket_t s, const sockaddr* addr, socklen_t len, int 
   FD_SET(s, &wfds);
   struct timeval tv { secs, 0 };
 
+#ifdef _WIN32
+  rc = select(0, nullptr, &wfds, nullptr, &tv);
+#else
   rc = select((int)s + 1, nullptr, &wfds, nullptr, &tv);
+#endif
 
   if (rc <= 0) {
     return false;
@@ -334,9 +344,12 @@ inline socket_t tcpConnect(const char* host, const char* port, const Proxy& px =
 
 struct NetworkClient : Chan<NetworkClient, NetworkTask, 32> {
   net::socket_t fd = net::INVALID;
+  bool logged_first_send = false;
 
   void init(const Conn& conn) {
-    this->fd = net::tcpConnect(conn.host.c_str(), conn.port.c_str(), conn.proxy);
+    //this->fd = net::tcpConnect(conn.host.c_str(), conn.port.c_str(), conn.proxy);
+    this->fd = net::tcpConnect(conn.host.c_str(), conn.port.c_str(),
+                               conn.proxy, 10, /*nodelay=*/true);
 
     if (!net::isValid(this->fd)) {
       throw std::runtime_error{"failed to connect to server"};
@@ -344,7 +357,15 @@ struct NetworkClient : Chan<NetworkClient, NetworkTask, 32> {
   }
 
   void process(NetworkTask& t) {
-    net::sendAll(this->fd, t.data.data(), t.data.size());
+    if (!this->logged_first_send) {
+      this->logged_first_send = true;
+      std::fprintf(stderr, "[dicker] net thread sending first %zu bytes\n", t.data.size());
+    }
+    if (!net::sendAll(this->fd, t.data.data(), t.data.size())) {
+      std::fprintf(stderr, "[!] sendAll failed: fd=%lld err=%d\n",
+                   (long long)this->fd, net::lastError());
+      throw std::runtime_error{"send failed"};
+    }
   }
 
   bool recvExact(void* buf, size_t len) {

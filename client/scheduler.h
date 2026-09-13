@@ -219,6 +219,7 @@ struct Scheduler {
     for (auto& e : roots) {
       this->run(e);
     }
+    std::cout << "start ended" << std::endl;
   }
 
   void run(const Root& root) {
@@ -261,16 +262,20 @@ struct Scheduler {
         for (uint64_t offset = 0; offset < size; offset += chunkSize, ++n) {
           const uint64_t len = std::min<uint64_t>(chunkSize, size - offset);
 
+          std::cout << "[*] Enqueue chunk: " << path.c_str() << std::endl;
           this->workers[n % this->workers.size()]->enqueue(
             WorkerTask{ dicker::UnitType::Chunk, path.c_str(),
                         static_cast<size_t>(offset), static_cast<size_t>(len) });
         }
       }
       else {
+        std::cout << "[*] Enqueue file: " << path.c_str() << std::endl;
         this->workers[this->selectWorker(static_cast<AffinityKey>(affinity::forPath(entry.path())))]->enqueue(
           WorkerTask{ dicker::UnitType::File, path.c_str(), 0, static_cast<size_t>(size) });
       }
     }
+
+    std::cout << "[*] Done" << std::endl;
   }
 };
 }  // namespace dicker

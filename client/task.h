@@ -18,7 +18,8 @@ struct Task {
 };
 
 struct WorkerTask : Task {
-  Completion* completion = nullptr;
+  //Completion* completion = nullptr;
+  std::shared_ptr<Completion> completion;
 
   WorkerTask() = default;
 
@@ -35,12 +36,14 @@ struct WorkerTask : Task {
 };
 
 struct ReadRequest : Task {
-  Completion* completion = nullptr;
+  //Completion* completion = nullptr;
+  std::shared_ptr<Completion> completion;
 };
 
 struct NetworkTask {
   std::vector<uint8_t> data; //TODO no zero-alloc ;(
-  Completion* completion = nullptr;
+  //Completion* completion = nullptr;
+  std::shared_ptr<Completion> completion;
 
   NetworkTask() = default;
 

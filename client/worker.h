@@ -3,6 +3,7 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <cstdio>
 #include <cstdint>
 #include <cstddef>
 #include <algorithm>
@@ -24,6 +25,29 @@
 
 namespace dicker {
 const size_t OUT_BUF_SIZE = READ_BLOCK + READ_BLOCK / 16 + 1024;
+
+inline std::string hex(const std::uint8_t* d, std::size_t n) {
+  static const char* H = "0123456789abcdef";
+  std::string s;
+  s.reserve(n * 2);
+  for (std::size_t i = 0; i < n; ++i) {
+    s.push_back(H[d[i] >> 4]);
+    s.push_back(H[d[i] & 0x0f]);
+  }
+  return s;
+}
+
+inline const char* handshakeStatusName(std::uint8_t s) {
+  switch (s) {
+    case 0: return "ok";
+    case 1: return "bad-magic";
+    case 2: return "bad-version";
+    case 3: return "auth-failed";
+    case 4: return "bad-algo";
+    case 5: return "server-error";
+    default: return "?";
+  }
+}
 
 struct Worker : Chan<Worker, WorkerTask, 128> {
   uint8_t outBuf[OUT_BUF_SIZE];
@@ -59,19 +83,38 @@ struct Worker : Chan<Worker, WorkerTask, 128> {
   void init() {
     this->integrity = has_flag(this->conn.flags, HandshakeFlag::IntegrityChecks);
 
+    std::fprintf(stderr,
+      "[dicker] connecting to %s:%s  algo=%u flags=%u keylen=%zu session=%s\n",
+      this->conn.host.c_str(), this->conn.port.c_str(),
+      static_cast<unsigned>(this->compressor->algo),
+      static_cast<unsigned>(this->conn.flags),
+      this->conn.key.size(),
+      hex(this->conn.sessionId.data(), this->conn.sessionId.size()).c_str());
+
     this->network.init(this->conn);
     this->network.start();
 
     auto hs = this->handshake(this->conn);
+    std::fprintf(stderr, "[dicker] handshake(%zu)=%s\n",
+                 hs.size(), hex(hs.data(), hs.size()).c_str());
 
     if (!this->network.await({hs.data(), hs.size()})) {
       throw std::runtime_error{"failed to send handshake"};
     }
 
     uint8_t reply[kHandshakeReplySize];
-    if (!this->network.recvExact(reply, sizeof(reply)) || reply[kMagic.size()] != 0) {
-      throw std::runtime_error{"handshake rejected by server"};
+    if (!this->network.recvExact(reply, sizeof(reply))) {
+      throw std::runtime_error{"no handshake reply (server closed the connection)"};
     }
+
+    const std::uint8_t status = reply[kMagic.size()];
+    std::fprintf(stderr, "[dicker] reply=%s status=%u (%s)\n",
+                 hex(reply, sizeof(reply)).c_str(), status, handshakeStatusName(status));
+    if (status != 0) {
+      throw std::runtime_error{std::string("handshake rejected by server: ") +
+                               handshakeStatusName(status)};
+    }
+    std::fprintf(stderr, "[dicker] handshake ok\n");
   }
 
   std::vector<uint8_t> handshake(const Conn& conn) { //TODO move to Conn I think
