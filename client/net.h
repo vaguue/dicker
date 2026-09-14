@@ -80,6 +80,16 @@ inline void setRecvTimeout(socket_t s, int secs) {
 #endif
 }
 
+inline void setSendTimeout(socket_t s, int secs) {
+#ifdef _WIN32
+  DWORD ms = (DWORD)secs * 1000;
+  setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, (const char*)&ms, sizeof ms);
+#else
+  struct timeval tv { secs, 0 };
+  setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+#endif
+}
+
 // disable Nagle: send small writes immediately instead of coalescing (~40ms). Latency win for
 // chatty small messages; no benefit for bulk transfers.
 inline void setNoDelay(socket_t s, bool on = true) {
@@ -201,7 +211,7 @@ inline bool connectTimeout(socket_t s, const sockaddr* addr, socklen_t len, int 
 }
 
 inline socket_t tcpDial(const char* host, const char* port, int timeoutSecs = 10, bool nodelay = false,
-                        int recvTimeoutSecs = 10) {
+                        int recvTimeoutSecs = 10, int sendTimeoutSecs = 60) {
   init();
   addrinfo hints{};
   hints.ai_family = AF_UNSPEC;
@@ -226,10 +236,8 @@ inline socket_t tcpDial(const char* host, const char* port, int timeoutSecs = 10
     }
 
     if (connectTimeout(fd, ai->ai_addr, (socklen_t)ai->ai_addrlen, timeoutSecs)) {
-      // every recv on this socket is bounded (handshake reply, SOCKS5
-      // negotiation, ...); 0 disables. Sends stay unbounded on purpose: a full
-      // send buffer is backpressure from a slow server, not a stall to abort on.
       setRecvTimeout(fd, recvTimeoutSecs);
+      setSendTimeout(fd, sendTimeoutSecs);
       freeaddrinfo(res);
       return fd;
     }
@@ -327,14 +335,16 @@ inline bool socks5Connect(socket_t s, const Proxy& px, const char* host, const c
 }
 
 inline socket_t tcpConnect(const char* host, const char* port, const Proxy& px = {},
-                           int timeoutSecs = 10, bool nodelay = false, int recvTimeoutSecs = 10) {
+                           int timeoutSecs = 10, bool nodelay = false, int recvTimeoutSecs = 10,
+                           int sendTimeoutSecs = 60) {
   if (!px.use) {
-    return tcpDial(host, port, timeoutSecs, nodelay, recvTimeoutSecs);
+    return tcpDial(host, port, timeoutSecs, nodelay, recvTimeoutSecs, sendTimeoutSecs);
   }
 
   log().info("via SOCKS5 %s:%s -> %s:%s", px.host.c_str(), px.port.c_str(), host, port);
 
-  socket_t s = tcpDial(px.host.c_str(), px.port.c_str(), timeoutSecs, nodelay, recvTimeoutSecs);
+  socket_t s = tcpDial(px.host.c_str(), px.port.c_str(), timeoutSecs, nodelay,
+                       recvTimeoutSecs, sendTimeoutSecs);
 
   if (!isValid(s)) {
     return INVALID;
@@ -356,10 +366,9 @@ struct NetworkClient : Chan<NetworkClient, NetworkTask, 32> {
   NetworkClient(Conn conn) : conn{conn} {}
 
   bool init() noexcept {
-    //this->fd = net::tcpConnect(conn.host.c_str(), conn.port.c_str(), conn.proxy);
     this->fd = net::tcpConnect(this->conn.host.c_str(), this->conn.port.c_str(),
                                this->conn.proxy, /*timeoutSecs=*/10, /*nodelay=*/true,
-                               /*recvTimeoutSecs=*/10);
+                               /*recvTimeoutSecs=*/10, /*sendTimeoutSecs=*/60);
 
     if (!net::isValid(this->fd)) {
       log().error("failed to connect to server");
@@ -369,6 +378,13 @@ struct NetworkClient : Chan<NetworkClient, NetworkTask, 32> {
     return true;
   }
 
+  ~NetworkClient() {
+    if (net::isValid(this->fd)) {
+      net::closeSock(this->fd);
+      this->fd = net::INVALID;
+    }
+  }
+
   bool process(NetworkTask& t) noexcept {
     if (!this->logged_first_send) {
       this->logged_first_send = true;
@@ -376,10 +392,9 @@ struct NetworkClient : Chan<NetworkClient, NetworkTask, 32> {
     }
     if (!net::sendAll(this->fd, t.data.data(), t.data.size())) {
       log().error("sendAll failed: fd=%lld err=%d", (long long)this->fd, net::lastError());
+      net::closeSock(this->fd);
+      this->fd = net::INVALID;
       return false;
-    }
-    else {
-      log().info("Send ok");
     }
 
     return true;

@@ -6,6 +6,8 @@
 #include <cstdint>
 #include <cstddef>
 #include <utility>
+#include <memory>
+#include <type_traits>
 
 namespace dicker {
 using AffinityKey = uint32_t;
@@ -43,8 +45,6 @@ struct Chan {
 
   std::atomic<AffinityKey> warm{NONE};
 
-  // Written by the consumer thread inside run(): -1 = init() still running
-  // (or the Impl has none), 1 = init succeeded, 0 = init failed.
   alignas(64) std::atomic<int> initState{-1};
 
   Chan() = default;
@@ -76,7 +76,6 @@ struct Chan {
     return this->initState.load(std::memory_order_relaxed);
   }
 
-  // Park until the consumer thread's init() has settled; true iff it succeeded.
   bool awaitInit() {
     this->initState.wait(-1, std::memory_order_acquire);
     return this->initState.load(std::memory_order_acquire) == 1;
@@ -169,7 +168,6 @@ struct Chan {
         this->initState.notify_all();
         if (!ok) {
           this->stop();
-          return;
         }
       }
       else {
@@ -180,6 +178,7 @@ struct Chan {
     }
     else {
       this->initState.store(1, std::memory_order_release);
+      this->initState.notify_all();
     }
 
     size_t hd = this->head.load(std::memory_order_relaxed);
@@ -210,23 +209,20 @@ struct Chan {
 
       using Ret = decltype(std::declval<Impl*>()->process(t));
 
+      bool ok = true;
+
       if constexpr (std::is_same_v<Ret, bool>) {
-        if (!static_cast<Impl*>(this)->process(t)) {
-          // release anyone parked in await() on this task before stopping,
-          // or they hang forever.
-          if (t.completion != nullptr) {
-            t.completion->signal(false);
-          }
-          this->stop();
-          return;
-        }
+        ok = static_cast<Impl*>(this)->process(t);
       }
       else {
         static_cast<Impl*>(this)->process(t);
       }
 
       if (t.completion != nullptr) {
-        t.completion->signal();
+        t.completion->signal(ok);
+      }
+      if (!ok) {
+        this->stop();
       }
     }
   }

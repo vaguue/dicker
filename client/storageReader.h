@@ -135,7 +135,9 @@ struct StorageReader : Chan<StorageReader, ReadRequest, 8> {
         break;
       }
 
-      this->ready.push(Filled{idx, static_cast<uint32_t>(got), false});
+      if (!this->ready.push(Filled{idx, static_cast<uint32_t>(got), false})) {
+        break;
+      }
       off += got;
       remaining -= got;
     }

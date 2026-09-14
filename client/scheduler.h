@@ -122,8 +122,8 @@ struct Scheduler {
   Config cfg;
   std::shared_ptr<Storage> storage;
   std::vector<Root> roots;
-  std::vector<std::unique_ptr<Worker>> workers;
   std::vector<std::shared_ptr<StorageReader>> readers;
+  std::vector<std::unique_ptr<Worker>> workers;
 
   const uint32_t busyThreshold = 32;
 
@@ -162,7 +162,7 @@ struct Scheduler {
   size_t selectWorker(AffinityKey incoming) {
     size_t chosen = -1;
 
-    size_t minIdx = 0;
+    size_t minIdx = static_cast<size_t>(-1);
     size_t minCap = 128;
 
     uint32_t chosenDistance = affinity::kWallCost + 1;
@@ -202,6 +202,22 @@ struct Scheduler {
     return minIdx;
   }
 
+  bool dispatch(size_t startIdx, const WorkerTask& t) {
+    for (size_t k = 0; k < this->workers.size(); ++k) {
+      size_t i = (startIdx + k) % this->workers.size();
+      auto& worker = this->workers[i];
+
+      if (!worker->healthy()) {
+        continue;
+      }
+      if (worker->enqueue(t)) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
   void start() {
     if (!this->roots.empty()) {
       this->storage->snapshot(this->roots.front().path.string().c_str());
@@ -215,13 +231,18 @@ struct Scheduler {
       e->start();
     }
 
+    bool ok = true;
     for (auto& e : roots) {
-      this->run(e);
+      if (!this->run(e)) {
+        ok = false;
+      }
     }
-    log().info("all units enqueued");
+    if (ok) {
+      log().info("all units enqueued");
+    }
   }
 
-  void run(const Root& root) {
+  bool run(const Root& root) {
     std::error_code ec;
     auto it = fs::recursive_directory_iterator(
       root.path, fs::directory_options::skip_permission_denied, ec);
@@ -260,34 +281,31 @@ struct Scheduler {
           const uint64_t len = std::min<uint64_t>(chunkSize, size - offset);
 
           log().info("enqueue chunk: %s", path.c_str());
-          auto& worker = this->workers[n % this->workers.size()];
 
-          if (!worker->healthy()) {
+          WorkerTask task{ dicker::UnitType::Chunk, path.c_str(),
+                           static_cast<size_t>(offset), static_cast<size_t>(len) };
+
+          if (!this->dispatch(n % this->workers.size(), task)) {
             log().error("No healthy workers");
-            return;
+            return false;
           }
-
-          worker->enqueue(
-            WorkerTask{ dicker::UnitType::Chunk, path.c_str(),
-                        static_cast<size_t>(offset), static_cast<size_t>(len) });
         }
       }
       else {
         log().info("enqueue file: %s", path.c_str());
 
-        auto& worker = this->workers[this->selectWorker(static_cast<AffinityKey>(affinity::forPath(entry.path())))];
+        WorkerTask task{ dicker::UnitType::File, path.c_str(), 0, static_cast<size_t>(size) };
+        size_t i = this->selectWorker(static_cast<AffinityKey>(affinity::forPath(entry.path())));
 
-        if (!worker->healthy()) {
+        if (!this->dispatch(i, task)) {
           log().error("No healthy workers");
-          return;
+          return false;
         }
-
-        worker->enqueue(
-          WorkerTask{ dicker::UnitType::File, path.c_str(), 0, static_cast<size_t>(size) });
       }
     }
 
     log().info("root done: %s", root.path.string().c_str());
+    return true;
   }
 };
 }  // namespace dicker

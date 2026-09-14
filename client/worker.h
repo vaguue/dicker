@@ -66,6 +66,7 @@ struct Worker : Chan<Worker, WorkerTask, 128> {
 
   ~Worker() {
     this->shutdown();
+    this->network.shutdown();
   }
 
   bool init() noexcept {
@@ -96,7 +97,7 @@ struct Worker : Chan<Worker, WorkerTask, 128> {
     uint8_t reply[kHandshakeReplySize];
 
     if (!this->network.recvExact(reply, sizeof(reply))) {
-      log().error("no handshake reply (server closed the connection)");
+      log().error("no handshake reply (timeout or server closed the connection)");
       return false;
     }
 
@@ -135,16 +136,28 @@ struct Worker : Chan<Worker, WorkerTask, 128> {
     return out;
   }
 
-  void sendBlock(const uint8_t* data, size_t len) {
+  bool sendBlock(const uint8_t* data, size_t len) {
     uint8_t header[5];
     header[0] = static_cast<uint8_t>(BlockType::Data);
     write_u32_le(header + 1, static_cast<uint32_t>(len));
 
-    this->network.enqueue({header, sizeof(header)});
-    this->network.enqueue({data, len});
+    if (!this->network.enqueue({header, sizeof(header)})) {
+      return false;
+    }
+    return this->network.enqueue({data, len});
   }
 
-  void process(const Task& t) noexcept {
+  void drainStorage() {
+    Filled fb;
+    while (this->storage->next(fb)) {
+      if (fb.eof) {
+        return;
+      }
+      this->storage->recycle(fb.idx);
+    }
+  }
+
+  bool process(const Task& t) noexcept {
     std::vector<uint8_t> header;
 
     header.push_back(static_cast<uint8_t>(t.type));
@@ -157,7 +170,9 @@ struct Worker : Chan<Worker, WorkerTask, 128> {
     if (t.type == UnitType::Chunk) {
       append_u64(header, t.offset);
     }
-    this->network.enqueue({header.data(), header.size()});
+    if (!this->network.enqueue({header.data(), header.size()})) {
+      return false;
+    }
 
     XXH64_state_t checksum;
     if (this->integrity) {
@@ -180,7 +195,11 @@ struct Worker : Chan<Worker, WorkerTask, 128> {
 
       size_t produced = this->compressor->update(data, fb.len, this->outBuf, OUT_BUF_SIZE);
       if (produced > 0) {
-        this->sendBlock(this->outBuf, produced);
+        if (!this->sendBlock(this->outBuf, produced)) {
+          this->storage->recycle(fb.idx);
+          this->drainStorage();
+          return false;
+        }
       }
 
       this->storage->recycle(fb.idx);
@@ -188,17 +207,25 @@ struct Worker : Chan<Worker, WorkerTask, 128> {
 
     size_t flushed = this->compressor->flush(this->outBuf, OUT_BUF_SIZE);
     if (flushed > 0) {
-      this->sendBlock(this->outBuf, flushed);
+      if (!this->sendBlock(this->outBuf, flushed)) {
+        return false;
+      }
     }
 
     uint8_t endOfUnit = static_cast<uint8_t>(BlockType::EndOfUnit);
-    this->network.enqueue({&endOfUnit, 1});
+    if (!this->network.enqueue({&endOfUnit, 1})) {
+      return false;
+    }
 
     if (this->integrity) {
       uint8_t checksumBytes[8];
       write_u64_le(checksumBytes, XXH64_digest(&checksum));
-      this->network.enqueue({checksumBytes, sizeof(checksumBytes)});
+      if (!this->network.enqueue({checksumBytes, sizeof(checksumBytes)})) {
+        return false;
+      }
     }
+
+    return true;
   }
 
   void finish() {
