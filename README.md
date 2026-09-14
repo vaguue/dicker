@@ -12,7 +12,8 @@ DICKER_SECRET=dicker-secret ./dicker-server --root /tmp
 ```
 following the client:
 ```bash
-./dicker dicker://dicker-secret@1.2.3.4:5959 file-or-directory-1 file-or-directory-2
+# use dicker for plaintext, dickers for dicker over TLS
+./dicker dickers://dicker-secret@1.2.3.4:5959 file-or-directory-1 file-or-directory-2
 ```
 
 C++ SDK usage:
@@ -20,7 +21,7 @@ C++ SDK usage:
 #include "dicker.h"
 
 int main() {
-  dicker::Conn conn{"dicker://dicker-secret@1.2.3.4:5959"};
+  dicker::Conn conn{"dickers://dicker-secret@1.2.3.4:5959"};
 
   dicker::Config cfg{conn};
   dicker::Scheduler dicker{cfg};
