@@ -170,6 +170,10 @@ struct Scheduler {
     for (size_t i{}; i < this->workers.size(); ++i) {
       auto& worker = this->workers[i];
 
+      if (!worker->healthy()) {
+        continue;
+      }
+
       auto wCap = worker->occupancy();
 
       if (wCap < minCap) {
@@ -229,8 +233,6 @@ struct Scheduler {
       const std::string name = entry.path().filename().string();
 
       if (entry.is_directory(ec)) {
-        // an excluded directory is pruned (never descended); a dir whose contents
-        // are excluded via dir/** is not matched here, so we still walk it.
         if (!keep(root.rules, rel, name, true)) {
           it.disable_recursion_pending();
         }
@@ -258,14 +260,29 @@ struct Scheduler {
           const uint64_t len = std::min<uint64_t>(chunkSize, size - offset);
 
           log().info("enqueue chunk: %s", path.c_str());
-          this->workers[n % this->workers.size()]->enqueue(
+          auto& worker = this->workers[n % this->workers.size()];
+
+          if (!worker->healthy()) {
+            log().error("No healthy workers");
+            return;
+          }
+
+          worker->enqueue(
             WorkerTask{ dicker::UnitType::Chunk, path.c_str(),
                         static_cast<size_t>(offset), static_cast<size_t>(len) });
         }
       }
       else {
         log().info("enqueue file: %s", path.c_str());
-        this->workers[this->selectWorker(static_cast<AffinityKey>(affinity::forPath(entry.path())))]->enqueue(
+
+        auto& worker = this->workers[this->selectWorker(static_cast<AffinityKey>(affinity::forPath(entry.path())))];
+
+        if (!worker->healthy()) {
+          log().error("No healthy workers");
+          return;
+        }
+
+        worker->enqueue(
           WorkerTask{ dicker::UnitType::File, path.c_str(), 0, static_cast<size_t>(size) });
       }
     }

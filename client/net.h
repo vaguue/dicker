@@ -200,7 +200,8 @@ inline bool connectTimeout(socket_t s, const sockaddr* addr, socklen_t len, int 
   return true;
 }
 
-inline socket_t tcpDial(const char* host, const char* port, int timeoutSecs = 10, bool nodelay = false) {
+inline socket_t tcpDial(const char* host, const char* port, int timeoutSecs = 10, bool nodelay = false,
+                        int recvTimeoutSecs = 10) {
   init();
   addrinfo hints{};
   hints.ai_family = AF_UNSPEC;
@@ -225,6 +226,10 @@ inline socket_t tcpDial(const char* host, const char* port, int timeoutSecs = 10
     }
 
     if (connectTimeout(fd, ai->ai_addr, (socklen_t)ai->ai_addrlen, timeoutSecs)) {
+      // every recv on this socket is bounded (handshake reply, SOCKS5
+      // negotiation, ...); 0 disables. Sends stay unbounded on purpose: a full
+      // send buffer is backpressure from a slow server, not a stall to abort on.
+      setRecvTimeout(fd, recvTimeoutSecs);
       freeaddrinfo(res);
       return fd;
     }
@@ -322,14 +327,14 @@ inline bool socks5Connect(socket_t s, const Proxy& px, const char* host, const c
 }
 
 inline socket_t tcpConnect(const char* host, const char* port, const Proxy& px = {},
-                           int timeoutSecs = 10, bool nodelay = false) {
+                           int timeoutSecs = 10, bool nodelay = false, int recvTimeoutSecs = 10) {
   if (!px.use) {
-    return tcpDial(host, port, timeoutSecs, nodelay);
+    return tcpDial(host, port, timeoutSecs, nodelay, recvTimeoutSecs);
   }
 
   log().info("via SOCKS5 %s:%s -> %s:%s", px.host.c_str(), px.port.c_str(), host, port);
 
-  socket_t s = tcpDial(px.host.c_str(), px.port.c_str(), timeoutSecs, nodelay);
+  socket_t s = tcpDial(px.host.c_str(), px.port.c_str(), timeoutSecs, nodelay, recvTimeoutSecs);
 
   if (!isValid(s)) {
     return INVALID;
@@ -346,26 +351,38 @@ inline socket_t tcpConnect(const char* host, const char* port, const Proxy& px =
 struct NetworkClient : Chan<NetworkClient, NetworkTask, 32> {
   net::socket_t fd = net::INVALID;
   bool logged_first_send = false;
+  Conn conn;
 
-  void init(const Conn& conn) {
+  NetworkClient(Conn conn) : conn{conn} {}
+
+  bool init() noexcept {
     //this->fd = net::tcpConnect(conn.host.c_str(), conn.port.c_str(), conn.proxy);
-    this->fd = net::tcpConnect(conn.host.c_str(), conn.port.c_str(),
-                               conn.proxy, 10, /*nodelay=*/true);
+    this->fd = net::tcpConnect(this->conn.host.c_str(), this->conn.port.c_str(),
+                               this->conn.proxy, /*timeoutSecs=*/10, /*nodelay=*/true,
+                               /*recvTimeoutSecs=*/10);
 
     if (!net::isValid(this->fd)) {
-      throw std::runtime_error{"failed to connect to server"};
+      log().error("failed to connect to server");
+      return false;
     }
+
+    return true;
   }
 
-  void process(NetworkTask& t) {
+  bool process(NetworkTask& t) noexcept {
     if (!this->logged_first_send) {
       this->logged_first_send = true;
       log().info("net thread sending first %zu bytes", t.data.size());
     }
     if (!net::sendAll(this->fd, t.data.data(), t.data.size())) {
       log().error("sendAll failed: fd=%lld err=%d", (long long)this->fd, net::lastError());
-      throw std::runtime_error{"send failed"};
+      return false;
     }
+    else {
+      log().info("Send ok");
+    }
+
+    return true;
   }
 
   bool recvExact(void* buf, size_t len) {

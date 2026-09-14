@@ -57,31 +57,18 @@ struct Worker : Chan<Worker, WorkerTask, 128> {
 
   std::shared_ptr<StorageReader> storage;
   std::unique_ptr<StreamCompressor> compressor;
-  NetworkClient network;
   Conn conn;
+  NetworkClient network;
 
   Worker(std::unique_ptr<StreamCompressor> compressor, std::shared_ptr<StorageReader> storage, Conn conn)
-    : storage{std::move(storage)}, compressor{std::move(compressor)}, conn{std::move(conn)} {
+    : storage{std::move(storage)}, compressor{std::move(compressor)}, conn{std::move(conn)}, network{this->conn} {
   }
 
-  // The consumer thread produces into `network` and drives `storage`, so it must
-  // be joined before those members are destroyed. The base ~Chan would join it
-  // after members are gone (base is destroyed last), so join it here first. It
-  // drains any queued units before returning.
   ~Worker() {
-    this->stopped.store(true, std::memory_order_release);
-    this->notEmptyGate.fetch_add(1, std::memory_order_release);
-    this->notEmptyGate.notify_all();
-    this->notFullGate.fetch_add(1, std::memory_order_release);
-    this->notFullGate.notify_all();
-    if (this->th.joinable()) {
-      this->th.join();
-    }
+    this->shutdown();
   }
 
-  // Runs on the worker's own consumer thread (invoked by Chan::run), so the
-  // handshake and every later block share one producer into `network`.
-  void init() {
+  bool init() noexcept {
     this->integrity = has_flag(this->conn.flags, HandshakeFlag::IntegrityChecks);
 
     log().info("connecting to %s:%s  algo=%u flags=%u keylen=%zu session=%s",
@@ -91,29 +78,42 @@ struct Worker : Chan<Worker, WorkerTask, 128> {
       this->conn.key.size(),
       hex(this->conn.sessionId.data(), this->conn.sessionId.size()).c_str());
 
-    this->network.init(this->conn);
     this->network.start();
+
+    if (!this->network.awaitInit()) {
+      log().error("network init failed");
+      return false;
+    }
 
     auto hs = this->handshake(this->conn);
     log().info("handshake(%zu)=%s", hs.size(), hex(hs.data(), hs.size()).c_str());
 
     if (!this->network.await({hs.data(), hs.size()})) {
-      throw std::runtime_error{"failed to send handshake"};
+      log().error("failed to send handshake");
+      return false;
     }
 
     uint8_t reply[kHandshakeReplySize];
+
     if (!this->network.recvExact(reply, sizeof(reply))) {
-      throw std::runtime_error{"no handshake reply (server closed the connection)"};
+      log().error("no handshake reply (server closed the connection)");
+      return false;
     }
 
     const std::uint8_t status = reply[kMagic.size()];
+
     log().info("reply=%s status=%u (%s)",
                hex(reply, sizeof(reply)).c_str(), status, handshakeStatusName(status));
+
     if (status != 0) {
-      throw std::runtime_error{std::string("handshake rejected by server: ") +
-                               handshakeStatusName(status)};
+      log().error((std::string("handshake rejected by server: ") +
+                               handshakeStatusName(status)).c_str());
+      return false;
     }
+
     log().info("handshake ok");
+
+    return true;
   }
 
   std::vector<uint8_t> handshake(const Conn& conn) { //TODO move to Conn I think
@@ -144,7 +144,7 @@ struct Worker : Chan<Worker, WorkerTask, 128> {
     this->network.enqueue({data, len});
   }
 
-  void process(const Task& t) {
+  void process(const Task& t) noexcept {
     std::vector<uint8_t> header;
 
     header.push_back(static_cast<uint8_t>(t.type));

@@ -13,12 +13,14 @@ constexpr AffinityKey NONE = 0;
 
 struct Completion {
   std::atomic<bool> done{false};
+  std::atomic<bool> ok{true};
 
   void wait() {
     this->done.wait(false, std::memory_order_acquire);
   }
 
-  void signal() {
+  void signal(bool success = true) {
+    this->ok.store(success, std::memory_order_release);
     this->done.store(true, std::memory_order_release);
     this->done.notify_one();
   }
@@ -41,6 +43,10 @@ struct Chan {
 
   std::atomic<AffinityKey> warm{NONE};
 
+  // Written by the consumer thread inside run(): -1 = init() still running
+  // (or the Impl has none), 1 = init succeeded, 0 = init failed.
+  alignas(64) std::atomic<int> initState{-1};
+
   Chan() = default;
   Chan(const Chan&) = delete;
   Chan& operator=(const Chan&) = delete;
@@ -60,6 +66,39 @@ struct Chan {
 
   void setWarm(AffinityKey key) {
     this->warm.store(key, std::memory_order_relaxed);
+  }
+
+  bool healthy() {
+    return !this->stopped.load(std::memory_order_relaxed);
+  }
+
+  int initOk() const {
+    return this->initState.load(std::memory_order_relaxed);
+  }
+
+  // Park until the consumer thread's init() has settled; true iff it succeeded.
+  bool awaitInit() {
+    this->initState.wait(-1, std::memory_order_acquire);
+    return this->initState.load(std::memory_order_acquire) == 1;
+  }
+
+  // Mark the channel stopped and wake every parked producer and the consumer so
+  // they re-check `stopped` and bail. Idempotent; does not join the thread.
+  void stop() {
+    this->stopped.store(true, std::memory_order_release);
+    this->notEmptyGate.fetch_add(1, std::memory_order_release);
+    this->notEmptyGate.notify_all();
+    this->notFullGate.fetch_add(1, std::memory_order_release);
+    this->notFullGate.notify_all();
+  }
+
+  // stop() plus join the consumer thread. Must be called from another thread,
+  // never the consumer itself. Idempotent.
+  void shutdown() {
+    this->stop();
+    if (this->th.joinable()) {
+      this->th.join();
+    }
   }
 
   void publish(size_t tl, Task&& t) {
@@ -117,12 +156,30 @@ struct Chan {
 
     c->wait();
 
-    return true;
+    return c->ok.load(std::memory_order_acquire);
   }
 
-  void run() {
+  void run() noexcept {
     if constexpr (requires(Impl* self) { self->init(); }) {
-      static_cast<Impl*>(this)->init();
+      using Ret = decltype(std::declval<Impl*>()->init());
+
+      if constexpr (std::is_same_v<Ret, bool>) {
+        const bool ok = static_cast<Impl*>(this)->init();
+        this->initState.store(ok ? 1 : 0, std::memory_order_release);
+        this->initState.notify_all();
+        if (!ok) {
+          this->stop();
+          return;
+        }
+      }
+      else {
+        static_cast<Impl*>(this)->init();
+        this->initState.store(1, std::memory_order_release);
+        this->initState.notify_all();
+      }
+    }
+    else {
+      this->initState.store(1, std::memory_order_release);
     }
 
     size_t hd = this->head.load(std::memory_order_relaxed);
@@ -151,7 +208,22 @@ struct Chan {
       this->notFullGate.fetch_add(1, std::memory_order_release);
       this->notFullGate.notify_one();
 
-      static_cast<Impl*>(this)->process(t);
+      using Ret = decltype(std::declval<Impl*>()->process(t));
+
+      if constexpr (std::is_same_v<Ret, bool>) {
+        if (!static_cast<Impl*>(this)->process(t)) {
+          // release anyone parked in await() on this task before stopping,
+          // or they hang forever.
+          if (t.completion != nullptr) {
+            t.completion->signal(false);
+          }
+          this->stop();
+          return;
+        }
+      }
+      else {
+        static_cast<Impl*>(this)->process(t);
+      }
 
       if (t.completion != nullptr) {
         t.completion->signal();
@@ -160,16 +232,7 @@ struct Chan {
   }
 
   ~Chan() {
-    this->stopped.store(true, std::memory_order_release);
-
-    this->notEmptyGate.fetch_add(1, std::memory_order_release);
-    this->notEmptyGate.notify_all();
-    this->notFullGate.fetch_add(1, std::memory_order_release);
-    this->notFullGate.notify_all();
-
-    if (this->th.joinable()) {
-      this->th.join();
-    }
+    this->shutdown();
   }
 };
 }  // namespace dicker
