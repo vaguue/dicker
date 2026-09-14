@@ -5,6 +5,7 @@
 int main() { 
   dicker::Conn conn{"dicker://kek@84.38.185.57:5959"};
   dicker::Config cfg{conn};
+  cfg.verbose = true;
 
   // Run the whole backup on its own thread. start() only enqueues work and
   // returns; the upload actually finishes when the Scheduler is destroyed (its

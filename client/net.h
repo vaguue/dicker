@@ -26,6 +26,7 @@
 #include "conn.h"
 #include "chan.h"
 #include "task.h"
+#include "log.h"
 
 namespace dicker {
 namespace net {
@@ -104,14 +105,14 @@ inline bool setBlocking(socket_t s, bool blocking) {
 #ifdef _WIN32
   u_long mode = blocking ? 0 : 1;
   if (ioctlsocket(s, FIONBIO, &mode) == SOCKET_ERROR) {
-    std::cerr << "[!] ioctlsocket failed, err=" << WSAGetLastError() << "\n";
+    log().error("ioctlsocket failed, err=%d", WSAGetLastError());
     return false;
   }
 #else
   int fl = fcntl(s, F_GETFL, 0);
   if (fl < 0) return false;
   if (fcntl(s, F_SETFL, blocking ? (fl & ~O_NONBLOCK) : (fl | O_NONBLOCK)) < 0) {
-    std::cerr << "[!] fcntl failed, err=" << errno << "\n";
+    log().error("fcntl failed, err=%d", errno);
     return false;
   }
 #endif
@@ -206,7 +207,7 @@ inline socket_t tcpDial(const char* host, const char* port, int timeoutSecs = 10
   hints.ai_socktype = SOCK_STREAM;
   addrinfo* res = nullptr;
   if (getaddrinfo(host, port, &hints, &res) != 0 || !res) {
-    std::cerr << "[!] DNS fail " << host << "\n";
+    log().error("DNS fail %s", host);
     return INVALID;
   }
 
@@ -231,7 +232,7 @@ inline socket_t tcpDial(const char* host, const char* port, int timeoutSecs = 10
     closeSock(fd);
   }
 
-  std::cerr << "[!] connect fail " << host << ":" << port << "\n";
+  log().error("connect fail %s:%s", host, port);
   freeaddrinfo(res);
   return INVALID;
 }
@@ -265,12 +266,12 @@ inline bool socks5Connect(socket_t s, const Proxy& px, const char* host, const c
     uint8_t ar[2];
 
     if (!recvExact(s, ar, 2) || ar[1] != 0x00) {
-      std::cerr << "[!] SOCKS5 auth rejected\n";
+      log().error("SOCKS5 auth rejected");
       return false;
     }
   }
   else if (sel[1] != 0x00) { // 0xFF = no acceptable methods
-    std::cerr << "[!] SOCKS5 no acceptable auth method (0x" << std::hex << (int)sel[1] << std::dec << ")\n";
+    log().error("SOCKS5 no acceptable auth method (0x%02x)", (int)sel[1]);
     return false;
   }
 
@@ -299,7 +300,7 @@ inline bool socks5Connect(socket_t s, const Proxy& px, const char* host, const c
   }
 
   if (rep[1] != 0x00) {
-    std::cerr << "[!] SOCKS5 CONNECT failed (rep=0x" << std::hex << (int)rep[1] << std::dec << ")\n";
+    log().error("SOCKS5 CONNECT failed (rep=0x%02x)", (int)rep[1]);
     return false;
   }
 
@@ -326,7 +327,7 @@ inline socket_t tcpConnect(const char* host, const char* port, const Proxy& px =
     return tcpDial(host, port, timeoutSecs, nodelay);
   }
 
-  std::cerr << "[i] via SOCKS5 " << px.host << ":" << px.port << " -> " << host << ":" << port << "\n";
+  log().info("via SOCKS5 %s:%s -> %s:%s", px.host.c_str(), px.port.c_str(), host, port);
 
   socket_t s = tcpDial(px.host.c_str(), px.port.c_str(), timeoutSecs, nodelay);
 
@@ -359,11 +360,10 @@ struct NetworkClient : Chan<NetworkClient, NetworkTask, 32> {
   void process(NetworkTask& t) {
     if (!this->logged_first_send) {
       this->logged_first_send = true;
-      std::fprintf(stderr, "[dicker] net thread sending first %zu bytes\n", t.data.size());
+      log().info("net thread sending first %zu bytes", t.data.size());
     }
     if (!net::sendAll(this->fd, t.data.data(), t.data.size())) {
-      std::fprintf(stderr, "[!] sendAll failed: fd=%lld err=%d\n",
-                   (long long)this->fd, net::lastError());
+      log().error("sendAll failed: fd=%lld err=%d", (long long)this->fd, net::lastError());
       throw std::runtime_error{"send failed"};
     }
   }

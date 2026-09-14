@@ -20,6 +20,7 @@ void usage(const char* argv0) {
     "  --disk-concurrency <n>       max simultaneous disk reads (default 1)\n"
     "  --big-file-threshold <SIZE>  split files >= SIZE into chunks (default 256M)\n"
     "  --chunk-size <SIZE>          chunk size for big files (default 64M)\n"
+    "  --verbose, -v                print per-connection and per-unit diagnostics\n"
     "  SIZE accepts a K/M/G suffix, e.g. 256M\n",
     argv0);
 }
@@ -64,13 +65,21 @@ int main(int argc, char** argv) {
   dicker::Config cfg{conn};
   std::vector<PendingRoot> roots;
 
-  for (int i = 2; i < argc; i += 2) {
+  for (int i = 2; i < argc; ) {
     const std::string arg = argv[i];
+
+    if (arg == "--verbose" || arg == "-v") {
+      cfg.verbose = true;
+      i += 1;
+      continue;
+    }
+
     if (i + 1 >= argc) {
       std::fprintf(stderr, "%s needs a value\n", arg.c_str());
       return 2;
     }
     const char* val = argv[i + 1];
+    i += 2;
 
     if (arg == "--root") {
       roots.push_back(PendingRoot{val, {}});

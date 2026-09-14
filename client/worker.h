@@ -21,6 +21,7 @@
 #include "compressor.h"
 #include "storageReader.h"
 #include "chan.h"
+#include "log.h"
 
 
 namespace dicker {
@@ -83,8 +84,7 @@ struct Worker : Chan<Worker, WorkerTask, 128> {
   void init() {
     this->integrity = has_flag(this->conn.flags, HandshakeFlag::IntegrityChecks);
 
-    std::fprintf(stderr,
-      "[dicker] connecting to %s:%s  algo=%u flags=%u keylen=%zu session=%s\n",
+    log().info("connecting to %s:%s  algo=%u flags=%u keylen=%zu session=%s",
       this->conn.host.c_str(), this->conn.port.c_str(),
       static_cast<unsigned>(this->compressor->algo),
       static_cast<unsigned>(this->conn.flags),
@@ -95,8 +95,7 @@ struct Worker : Chan<Worker, WorkerTask, 128> {
     this->network.start();
 
     auto hs = this->handshake(this->conn);
-    std::fprintf(stderr, "[dicker] handshake(%zu)=%s\n",
-                 hs.size(), hex(hs.data(), hs.size()).c_str());
+    log().info("handshake(%zu)=%s", hs.size(), hex(hs.data(), hs.size()).c_str());
 
     if (!this->network.await({hs.data(), hs.size()})) {
       throw std::runtime_error{"failed to send handshake"};
@@ -108,13 +107,13 @@ struct Worker : Chan<Worker, WorkerTask, 128> {
     }
 
     const std::uint8_t status = reply[kMagic.size()];
-    std::fprintf(stderr, "[dicker] reply=%s status=%u (%s)\n",
-                 hex(reply, sizeof(reply)).c_str(), status, handshakeStatusName(status));
+    log().info("reply=%s status=%u (%s)",
+               hex(reply, sizeof(reply)).c_str(), status, handshakeStatusName(status));
     if (status != 0) {
       throw std::runtime_error{std::string("handshake rejected by server: ") +
                                handshakeStatusName(status)};
     }
-    std::fprintf(stderr, "[dicker] handshake ok\n");
+    log().info("handshake ok");
   }
 
   std::vector<uint8_t> handshake(const Conn& conn) { //TODO move to Conn I think

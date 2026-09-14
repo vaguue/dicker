@@ -12,10 +12,12 @@
 #include "protocol.h"
 #include "compressor.h"
 #include "conn.h"
+#include "config.h"
 #include "task.h"
 #include "storage.h"
 #include "worker.h"
 #include "affinity.h"
+#include "log.h"
 
 namespace dicker {
 namespace fs = std::filesystem;
@@ -116,15 +118,6 @@ struct Root {
   std::vector<Rule> rules;
 };
 
-struct Config {
-  Conn conn;
-
-  size_t diskConcurrency = 1;
-  size_t workers = 4;
-  size_t bigFileThreshold = 256 * 1024 * 1024;
-  size_t chunkSize = 64 * 1024 * 1024;
-};
-
 struct Scheduler {
   Config cfg;
   std::shared_ptr<Storage> storage;
@@ -135,6 +128,8 @@ struct Scheduler {
   const uint32_t busyThreshold = 32;
 
   Scheduler(const Config& cfg) : cfg{cfg} {
+    log().configure(this->cfg);
+
     this->storage = std::make_shared<Storage>(this->cfg.diskConcurrency);
 
     readers.reserve(this->cfg.workers);
@@ -219,7 +214,7 @@ struct Scheduler {
     for (auto& e : roots) {
       this->run(e);
     }
-    std::cout << "start ended" << std::endl;
+    log().info("all units enqueued");
   }
 
   void run(const Root& root) {
@@ -262,20 +257,20 @@ struct Scheduler {
         for (uint64_t offset = 0; offset < size; offset += chunkSize, ++n) {
           const uint64_t len = std::min<uint64_t>(chunkSize, size - offset);
 
-          std::cout << "[*] Enqueue chunk: " << path.c_str() << std::endl;
+          log().info("enqueue chunk: %s", path.c_str());
           this->workers[n % this->workers.size()]->enqueue(
             WorkerTask{ dicker::UnitType::Chunk, path.c_str(),
                         static_cast<size_t>(offset), static_cast<size_t>(len) });
         }
       }
       else {
-        std::cout << "[*] Enqueue file: " << path.c_str() << std::endl;
+        log().info("enqueue file: %s", path.c_str());
         this->workers[this->selectWorker(static_cast<AffinityKey>(affinity::forPath(entry.path())))]->enqueue(
           WorkerTask{ dicker::UnitType::File, path.c_str(), 0, static_cast<size_t>(size) });
       }
     }
 
-    std::cout << "[*] Done" << std::endl;
+    log().info("root done: %s", root.path.string().c_str());
   }
 };
 }  // namespace dicker
