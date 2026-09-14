@@ -10,7 +10,7 @@ MODS=../cxx_modules
 STD="-std=c++20"
 OPT="-O2"
 SEC="-ffunction-sections -fdata-sections"
-INC="-I. -I../shared -I$MODS -I$MODS/lz4 -I$MODS/zstd/lib"
+INC="-I. -I../shared -I$MODS -I$MODS/lz4 -I$MODS/zstd/lib -I../out/openssl-host/include"
 
 case "$(uname -s)" in
   Linux) SIZEOPT="-Wl,--gc-sections -s" ;;
@@ -22,6 +22,8 @@ if [ ! -f "$LIBV" ]; then
   ./build.sh >/dev/null   # produces the vendored static lib (and out/dicker)
 fi
 
+../build-openssl.sh ""
+
 echo "[*] linking out/dicker-local"
-zig c++ $STD $OPT $SEC -Wall $INC main.cxx "$LIBV" $SIZEOPT -o out/dicker-local
+zig c++ $STD $OPT $SEC -Wall $INC main.cxx "$LIBV" -L../out/openssl-host/lib -lssl -lcrypto $SIZEOPT -o out/dicker-local
 echo "[+] built ./out/dicker-local"

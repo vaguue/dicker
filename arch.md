@@ -121,3 +121,25 @@ computed incrementally on both ends as blocks flow. END-OF-SESSION
   `LZ4F_flush` per unit. Cross-file window 64 KB (format cap).
 - **zstd**: one `ZSTD_CStream` per connection, `ZSTD_e_flush` per unit, never
   `e_end` mid-connection. Server allows `windowLogMax = 31`.
+
+# TLS (dickers://)
+
+The URL scheme selects the transport: `dickers://` speaks TLS from the very
+first byte of the connection (the ClientHello opens the stream); `dicker://`
+is the plaintext v1 wire protocol. The server accepts both on the same port and
+picks by the first byte received: 0x16 (TLS handshake record) => TLS, anything
+else => plaintext DKR1. TLS is transport only: the HMAC handshake remains the
+sole authentication and the client performs no certificate verification
+(SSL_VERIFY_NONE); the server presents a self-signed EC P-256 certificate
+embedded in `server/tls_cert.h`. Regenerate it with:
+
+```
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 \
+  -keyout key.pem -out cert.pem -days 36500 -nodes -subj "/CN=dicker"
+```
+
+and paste both PEMs into `server/tls_cert.h`. No close_notify is exchanged:
+teardown is TCP FIN, as in the plaintext protocol. OpenSSL 3.5.4 is built from
+source, statically, per target by `build-openssl.sh` (zig), cached in
+`out/openssl-$SUFFIX` — delete that directory to force a rebuild. Windows links
+add `-lcrypt32 -lgdi32 -luser32 -ladvapi32`; Linux adds `-ldl -lrt`.

@@ -23,6 +23,8 @@ if [ -n "$TARGET" ]; then
   SUFFIX="$TARGET"
 fi
 
+OSSLDIR="../out/openssl-$SUFFIX"
+
 # OS comes from the target triple when cross-compiling, else from the host.
 OSSEL="${TARGET:-$(uname -s)}"
 case "$OSSEL" in
@@ -86,8 +88,8 @@ if [ ! -f "$VLIB" ]; then
 fi
 
 # ---------- server ----------
-SOURCES="main.cxx server.cxx connection.cxx byte_channel.cxx file_sink.cxx handshake.cxx decompressor.cxx lz4_decompressor.cxx zstd_decompressor.cxx"
-INC="-I../shared -I$UV/include -I$MODS/lz4 -I$MODS/zstd/lib"
+SOURCES="main.cxx server.cxx connection.cxx tls_layer.cxx byte_channel.cxx file_sink.cxx handshake.cxx decompressor.cxx lz4_decompressor.cxx zstd_decompressor.cxx"
+INC="-I../shared -I$UV/include -I$MODS/lz4 -I$MODS/zstd/lib -I$OSSLDIR/include"
 
 SYSLIBS="-lpthread"
 if [ "$OS" = linux ]; then
@@ -97,6 +99,8 @@ fi
 SRVOUT="out/dicker-server"
 [ -n "$TARGET" ] && SRVOUT="out/dicker-server-$SUFFIX"   # cross builds never clobber the host binary
 
+../build-openssl.sh "${TARGET:-}"
+
 echo "[*] linking $SRVOUT"
-zig c++ $TARGETFLAG $STD $OPT $SEC -Wall $INC $SOURCES "$UVLIB" "$VLIB" $SYSLIBS $SIZEOPT -o "$SRVOUT"
+zig c++ $TARGETFLAG $STD $OPT $SEC -Wall $INC $SOURCES "$UVLIB" "$VLIB" -L"$OSSLDIR/lib" -lssl -lcrypto $SYSLIBS $SIZEOPT -o "$SRVOUT"
 echo "[+] built ./$SRVOUT"

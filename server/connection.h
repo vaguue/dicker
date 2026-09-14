@@ -10,6 +10,7 @@
 #include "protocol.h"
 #include "byte_channel.h"
 #include "decompressor.h"
+#include "tls_layer.h"
 
 namespace dicker {
 
@@ -33,12 +34,15 @@ namespace dicker {
     static void alloc_cb(uv_handle_t* handle, std::size_t suggested_size, uv_buf_t* buffer);
     static void on_read(uv_stream_t* stream, ssize_t nread, const uv_buf_t* buffer);
     static void on_write_reply(uv_write_t* request, int status);
+    static void on_write_tls(uv_write_t* request, int status);
     static void on_resume_async(uv_async_t* handle);
     static void on_close_async(uv_async_t* handle);
     static void on_handle_closed(uv_handle_t* handle);
 
+    void handle_raw(const std::uint8_t* data, std::size_t len);
     void handle_data(const std::uint8_t* data, std::size_t len);
     void handle_handshake_data(const std::uint8_t* data, std::size_t len);
+    void tls_write(const std::uint8_t* data, std::size_t len, bool teardown_after);
     void send_handshake_reply(HandshakeStatus status);
     void apply_backpressure();
     void consumer_main();
@@ -53,6 +57,10 @@ namespace dicker {
 
     State state_;
     std::vector<std::uint8_t> handshake_buffer_;
+
+    TlsLayer tls_;
+    bool tls_detected_ = false;
+    bool tls_active_ = false;
 
     ByteChannel channel_;
     std::thread consumer_;

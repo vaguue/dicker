@@ -92,6 +92,7 @@ struct Conn {
   uint8_t flags = 0;
   dicker::CompressionAlgo compressionAlgo = dicker::CompressionAlgo::Zstd;
   Proxy proxy = {};
+  bool tls = false;
 
   Conn() = default;
 
@@ -105,6 +106,7 @@ struct Conn {
   void parse(const std::string& url) {
     std::string s = url;
     if (auto scheme = s.find("://"); scheme != std::string::npos) {
+      this->tls = (s.compare(0, scheme, "dickers") == 0);
       s = s.substr(scheme + 3);
     }
 

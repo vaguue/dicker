@@ -26,6 +26,9 @@ if [ -n "$TARGET" ]; then
   SUFFIX="$TARGET"
 fi
 
+OSSLDIR="../out/openssl-$SUFFIX"
+INC="$INC -I$OSSLDIR/include"
+
 # dead-strip + symbol strip: ELF/COFF via lld take --gc-sections -s; mach-o ld64
 # uses -dead_strip.
 case "${TARGET:-$(uname -s)}" in
@@ -39,7 +42,10 @@ EXTRA_LIBS=""
 case "$TARGET" in
   *windows*)
     OUT="$OUT.exe"
-    EXTRA_LIBS="-lws2_32 -lvssapi -lole32 -loleaut32"
+    EXTRA_LIBS="-lws2_32 -lvssapi -lole32 -loleaut32 -lcrypt32 -lgdi32 -luser32 -ladvapi32"
+    ;;
+  *linux*)
+    EXTRA_LIBS="-ldl -lrt"
     ;;
 esac
 
@@ -65,6 +71,8 @@ if [ ! -f "$LIBV" ]; then
   zig ar rcs "$LIBV" $OBJS
 fi
 
+../build-openssl.sh "${TARGET:-}"
+
 echo "[*] linking $OUT"
-zig c++ $TARGETFLAG $STD $OPT $SEC -Wall $INC cli.cxx "$LIBV" $EXTRA_LIBS $SIZEOPT -o "$OUT"
+zig c++ $TARGETFLAG $STD $OPT $SEC -Wall $INC cli.cxx "$LIBV" -L"$OSSLDIR/lib" -lssl -lcrypto $EXTRA_LIBS $SIZEOPT -o "$OUT"
 echo "[+] built ./$OUT"

@@ -30,6 +30,17 @@ namespace dicker {
       return "?";
     }
 
+    std::string hex(const std::uint8_t* d, std::size_t n) {
+      static const char* H = "0123456789abcdef";
+      std::string s;
+      s.reserve(n * 2);
+      for (std::size_t i = 0; i < n; ++i) {
+        s.push_back(H[d[i] >> 4]);
+        s.push_back(H[d[i] & 0x0f]);
+      }
+      return s;
+    }
+
     const char* algo_name(CompressionAlgo algo) {
       switch (algo) {
         case CompressionAlgo::None: return "none";
@@ -64,6 +75,13 @@ namespace dicker {
     struct ReplyWrite {
       uv_write_t request;
       std::uint8_t data[kHandshakeReplySize];
+      Connection* connection;
+      bool teardown_after;
+    };
+
+    struct TlsWrite {
+      uv_write_t request;
+      std::vector<std::uint8_t> data;
       Connection* connection;
       bool teardown_after;
     };
@@ -139,14 +157,36 @@ namespace dicker {
   void Connection::on_read(uv_stream_t* stream, ssize_t nread, const uv_buf_t* buffer) {
     Connection* connection = static_cast<Connection*>(stream->data);
     if (nread > 0) {
-      connection->handle_data(reinterpret_cast<const std::uint8_t*>(buffer->base),
-                              static_cast<std::size_t>(nread));
+      connection->handle_raw(reinterpret_cast<const std::uint8_t*>(buffer->base),
+                             static_cast<std::size_t>(nread));
     }
     else if (nread < 0) {
       connection->begin_teardown();
     }
     if (buffer->base != nullptr) {
       std::free(buffer->base);
+    }
+  }
+
+  void Connection::handle_raw(const std::uint8_t* data, std::size_t len) {
+    if (state_ == State::Handshaking && !tls_detected_) {
+      tls_detected_ = true;
+      if (len > 0 && data[0] == 0x16) {
+        tls_active_ = true;
+      }
+      std::fprintf(stderr, "conn %s from %s\n", tls_active_ ? "tls" : "plain", peer_.c_str());
+      if (tls_active_ && !tls_.init()) {
+        std::fprintf(stderr, "tls init failed from %s\n", peer_.c_str());
+        begin_teardown();
+        return;
+      }
+    }
+
+    if (tls_active_) {
+      tls_.ingest(this, data, len);
+    }
+    else {
+      handle_data(data, len);
     }
   }
 
@@ -173,6 +213,11 @@ namespace dicker {
     if (handshake_buffer_.size() < kHandshakeRequestSize) {
       return;
     }
+
+    std::fprintf(stderr, "recv handshake(%zu)=%s from %s (keylen=%zu)\n",
+                 static_cast<std::size_t>(kHandshakeRequestSize),
+                 hex(handshake_buffer_.data(), kHandshakeRequestSize).c_str(),
+                 peer_.c_str(), server_->config().key.size());
 
     HandshakeRequest request;
     HandshakeStatus status = parse_and_verify_handshake(handshake_buffer_.data(),
@@ -215,6 +260,20 @@ namespace dicker {
   }
 
   void Connection::send_handshake_reply(HandshakeStatus status) {
+    if (tls_active_) {
+      std::uint8_t data[kHandshakeReplySize];
+      std::memcpy(data, kMagic.data(), kMagic.size());
+      data[kMagic.size()] = static_cast<std::uint8_t>(status);
+
+      if (SSL_write(tls_.ssl, data, sizeof data) <= 0) {
+        begin_teardown();
+        return;
+      }
+
+      tls_.flush_out(this, status != HandshakeStatus::Ok);
+      return;
+    }
+
     ReplyWrite* reply = new ReplyWrite();
     std::memcpy(reply->data, kMagic.data(), kMagic.size());
     reply->data[kMagic.size()] = static_cast<std::uint8_t>(status);
@@ -228,6 +287,33 @@ namespace dicker {
     if (result != 0) {
       delete reply;
       begin_teardown();
+    }
+  }
+
+  void Connection::tls_write(const std::uint8_t* data, std::size_t len, bool teardown_after) {
+    TlsWrite* write = new TlsWrite();
+    write->data.assign(data, data + len);
+    write->connection = this;
+    write->teardown_after = teardown_after;
+    write->request.data = write;
+
+    uv_buf_t buffer = uv_buf_init(reinterpret_cast<char*>(write->data.data()),
+                                  static_cast<unsigned int>(write->data.size()));
+    int result = uv_write(&write->request, reinterpret_cast<uv_stream_t*>(&tcp_),
+                          &buffer, 1, on_write_tls);
+    if (result != 0) {
+      delete write;
+      begin_teardown();
+    }
+  }
+
+  void Connection::on_write_tls(uv_write_t* request, int status) {
+    TlsWrite* write = static_cast<TlsWrite*>(request->data);
+    Connection* connection = write->connection;
+    bool teardown_after = write->teardown_after || status != 0;
+    delete write;
+    if (teardown_after) {
+      connection->begin_teardown();
     }
   }
 
