@@ -1,13 +1,23 @@
 #include "tls_layer.h"
 
+#include <cstdio>
+
 #include <openssl/pem.h>
 #include <openssl/x509.h>
 #include <openssl/evp.h>
+#include <openssl/err.h>
 
 #include "tls_cert.h"
 #include "connection.h"
 
 namespace dicker {
+
+namespace {
+void tlsError(const char* what) {
+  char ebuf[256];
+  std::fprintf(stderr, "[tls] %s: %s\n", what, ERR_error_string(ERR_get_error(), ebuf));
+}
+}
 
 TlsLayer::~TlsLayer() {
   SSL_free(this->ssl);
@@ -16,16 +26,22 @@ TlsLayer::~TlsLayer() {
 
 bool TlsLayer::init() {
   this->ctx = SSL_CTX_new(TLS_server_method());
+  if (this->ctx == nullptr) {
+    tlsError("SSL_CTX_new failed");
+    return false;
+  }
 
   BIO* cert_bio = BIO_new_mem_buf(kTlsCertPem, -1);
   X509* cert = PEM_read_bio_X509(cert_bio, nullptr, nullptr, nullptr);
   BIO_free(cert_bio);
   if (cert == nullptr) {
+    tlsError("PEM_read_bio_X509 failed");
     return false;
   }
   int rc = SSL_CTX_use_certificate(this->ctx, cert);
   X509_free(cert);
   if (rc != 1) {
+    tlsError("SSL_CTX_use_certificate failed");
     return false;
   }
 
@@ -33,21 +49,32 @@ bool TlsLayer::init() {
   EVP_PKEY* key = PEM_read_bio_PrivateKey(key_bio, nullptr, nullptr, nullptr);
   BIO_free(key_bio);
   if (key == nullptr) {
+    tlsError("PEM_read_bio_PrivateKey failed");
     return false;
   }
   rc = SSL_CTX_use_PrivateKey(this->ctx, key);
   EVP_PKEY_free(key);
   if (rc != 1) {
+    tlsError("SSL_CTX_use_PrivateKey failed");
     return false;
   }
 
   if (SSL_CTX_check_private_key(this->ctx) != 1) {
+    tlsError("SSL_CTX_check_private_key failed");
     return false;
   }
 
   this->ssl = SSL_new(this->ctx);
+  if (this->ssl == nullptr) {
+    tlsError("SSL_new failed");
+    return false;
+  }
   this->rbio = BIO_new(BIO_s_mem());
   this->wbio = BIO_new(BIO_s_mem());
+  if (this->rbio == nullptr || this->wbio == nullptr) {
+    std::fprintf(stderr, "[tls] BIO_new failed\n");
+    return false;
+  }
 
   SSL_set_bio(this->ssl, this->rbio, this->wbio);
   SSL_set_accept_state(this->ssl);

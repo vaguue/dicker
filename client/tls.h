@@ -5,8 +5,10 @@
 #include <cstddef>
 
 #include <openssl/ssl.h>
+#include <openssl/err.h>
 
 #include "net_io.h"
+#include "log.h"
 
 namespace dicker {
 struct TlsSession {
@@ -53,11 +55,25 @@ struct TlsSession {
     this->fd = fd;
 
     this->ctx = SSL_CTX_new(TLS_client_method());
+    if (this->ctx == nullptr) {
+      char ebuf[256];
+      log().error("SSL_CTX_new failed: %s", ERR_error_string(ERR_get_error(), ebuf));
+      return false;
+    }
     SSL_CTX_set_verify(this->ctx, SSL_VERIFY_NONE, nullptr);
 
     this->ssl = SSL_new(this->ctx);
+    if (this->ssl == nullptr) {
+      char ebuf[256];
+      log().error("SSL_new failed: %s", ERR_error_string(ERR_get_error(), ebuf));
+      return false;
+    }
     this->rbio = BIO_new(BIO_s_mem());
     this->wbio = BIO_new(BIO_s_mem());
+    if (this->rbio == nullptr || this->wbio == nullptr) {
+      log().error("BIO_new failed");
+      return false;
+    }
 
     SSL_set_bio(this->ssl, this->rbio, this->wbio);
     SSL_set_tlsext_host_name(this->ssl, host.c_str());

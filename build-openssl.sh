@@ -15,7 +15,9 @@
 #
 # The default provider's dispatch tables are trimmed by cxx_modules/openssl-trim.patch
 # (applied after extraction; its hash is part of the cache stamp, so a changed
-# patch rebuilds every target automatically). Kept: AES-CBC/GCM, ChaCha20-Poly1305,
+# patch rebuilds every target automatically). Set APPLY_PATCH=0 below to build
+# unpatched (the source tree is un-patched and the stamp flips, so toggling it
+# always triggers a rebuild). Kept: AES-CBC/GCM, ChaCha20-Poly1305,
 # SHA-1/2, HMAC, EC/ECDHE/ECDSA, HKDF/TLS-PRF/PBKDF2, CTR-DRBG. Dropped: RSA, DSA,
 # DH, Ed/X25519, SHA-3, ARIA/Camellia/DES/RC4/SM2/3/4, ML-KEM/ML-DSA/SLH-DSA, legacy
 # provider, key encoders.
@@ -55,8 +57,13 @@ BUILDDIR="$SRCDIR/build-$SUFFIX"
 FLAGS="no-shared no-tests no-apps no-docs no-engine no-dso no-deprecated no-comp no-sock no-dtls \
 no-cmp no-des no-sm3 no-legacy no-blake2 no-cmac no-jitter \
 -ffunction-sections -fdata-sections $ASMFLAG"
-PATCHSUM=$(shasum -a 256 cxx_modules/openssl-trim.patch | awk '{print $1}')
-STAMP="$PRESET|$VER|$FLAGS|$PATCHSUM"
+APPLY_PATCH=1
+if [ "$APPLY_PATCH" = "1" ]; then
+  PATCHSUM=$(shasum -a 256 cxx_modules/openssl-trim.patch | awk '{print $1}')
+else
+  PATCHSUM="none"
+fi
+STAMP="2|$PRESET|$VER|$FLAGS|$PATCHSUM"
 
 if [ -f "$DEST/lib/libcrypto.a" ] && [ -f "$DEST/lib/libssl.a" ] \
    && [ -f "$DEST/include/openssl/ssl.h" ] \
@@ -73,7 +80,11 @@ if [ ! -d "$SRCDIR/openssl-$VER" ]; then
   tar xzf "$SRCDIR/openssl-$VER.tar.gz" -C "$SRCDIR"
 fi
 
-patch -p1 -N -s -d "$SRCDIR/openssl-$VER" < "$(pwd)/cxx_modules/openssl-trim.patch" || [ $? -eq 1 ]
+if [ "$APPLY_PATCH" = "1" ]; then
+  patch -p1 -N -s -d "$SRCDIR/openssl-$VER" < "$(pwd)/cxx_modules/openssl-trim.patch" || [ $? -eq 1 ]
+else
+  patch -p1 -R -N -s -d "$SRCDIR/openssl-$VER" < "$(pwd)/cxx_modules/openssl-trim.patch" || [ $? -eq 1 ]
+fi
 
 rm -rf "$BUILDDIR"
 mkdir -p "$BUILDDIR"
