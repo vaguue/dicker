@@ -22,26 +22,11 @@
 namespace dicker {
 namespace fs = std::filesystem;
 
-// rsync-style path filter: an ordered list of include/exclude rules; the FIRST
-// rule that matches a path decides; no match => included. Semantics mirror rsync
-// so unix users aren't surprised:
-//   *            matches within a path segment (does not cross '/')
-//   **           matches across '/'
-//   ?            one non-'/' char
-//   leading '/'  anchors the pattern to the root
-//   trailing '/' matches directories only
-//   no '/' in the pattern => matched against the basename at any depth
-// To keep one file inside an otherwise-excluded dir, exclude the dir's CONTENTS
-// (dir/**) — not the dir (dir/) — and put the re-include BEFORE it, e.g.
-//   include "media_cache/version"  then  exclude "media_cache/**".
-// Excluding the directory itself (dir/ or bare dir) prunes it (never walked).
 struct FilterRule {
   bool include;
   std::string pattern;
 };
 
-// Sugar so callers write ordered rules readably:
-//   addRoot(path, { include("media_cache/version"), exclude("media_cache/**") });
 inline FilterRule include(std::string pattern) { return FilterRule{ true, std::move(pattern) }; }
 inline FilterRule exclude(std::string pattern) { return FilterRule{ false, std::move(pattern) }; }
 
@@ -119,11 +104,18 @@ struct Root {
 };
 
 struct Scheduler {
+  enum class WorkerState : uint8_t {
+    PENDING = 0,
+    READY = 1,
+    FAILED = 2,
+  };
+
   Config cfg;
   std::shared_ptr<Storage> storage;
   std::vector<Root> roots;
   std::vector<std::shared_ptr<StorageReader>> readers;
   std::vector<std::unique_ptr<Worker>> workers;
+  std::vector<WorkerState> workersStates;
 
   const uint32_t busyThreshold = 32;
 
@@ -132,18 +124,19 @@ struct Scheduler {
 
     this->storage = std::make_shared<Storage>(this->cfg.diskConcurrency);
 
-    readers.reserve(this->cfg.workers);
+    this->readers.reserve(this->cfg.workers);
 
     for (size_t i = 0; i < this->cfg.workers; ++i) {
-      readers.emplace_back(std::make_shared<StorageReader>(this->storage.get()));
+      this->readers.emplace_back(std::make_shared<StorageReader>(this->storage.get()));
     }
 
-    workers.reserve(cfg.workers);
+    this->workers.reserve(cfg.workers);
+    this->workersStates.resize(cfg.workers);
 
     for (size_t i = 0; i < cfg.workers; ++i) {
-      workers.emplace_back(std::make_unique<Worker>(
+      this->workers.emplace_back(std::make_unique<Worker>(
         makeCompressor(cfg.conn.compressionAlgo),
-        readers[i],
+        this->readers[i],
         cfg.conn)
       );
     }
@@ -153,9 +146,11 @@ struct Scheduler {
     Root root;
     root.path = std::move(p);
     root.rules.reserve(rules.size());
+
     for (const FilterRule& fr : rules) {
       root.rules.push_back(compileRule(fr));
     }
+
     this->roots.push_back(std::move(root));
   }
 
@@ -207,10 +202,23 @@ struct Scheduler {
       size_t i = (startIdx + k) % this->workers.size();
       auto& worker = this->workers[i];
 
-      if (!worker->healthy()) {
+      if (this->workersStates[i] == WorkerState::PENDING) {
+        if (!worker->awaitInit()) {
+          this->workersStates[i] = WorkerState::FAILED;
+          log().info((std::string("Skipping worker (1) ") + std::to_string(i)).c_str());
+          continue;
+        }
+        else {
+          this->workersStates[i] = WorkerState::READY;
+        }
+      }
+
+      if (workersStates[i] == WorkerState::FAILED || !worker->healthy()) {
+        log().info((std::string("Skipping worker (2) ") + std::to_string(i)).c_str());
         continue;
       }
       if (worker->enqueue(t)) {
+        log().info((std::string("Queueing worker ") + std::to_string(i)).c_str());
         return true;
       }
     }

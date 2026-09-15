@@ -81,8 +81,6 @@ struct Chan {
     return this->initState.load(std::memory_order_acquire) == 1;
   }
 
-  // Mark the channel stopped and wake every parked producer and the consumer so
-  // they re-check `stopped` and bail. Idempotent; does not join the thread.
   void stop() {
     this->stopped.store(true, std::memory_order_release);
     this->notEmptyGate.fetch_add(1, std::memory_order_release);
@@ -91,8 +89,6 @@ struct Chan {
     this->notFullGate.notify_all();
   }
 
-  // stop() plus join the consumer thread. Must be called from another thread,
-  // never the consumer itself. Idempotent.
   void shutdown() {
     this->stop();
     if (this->th.joinable()) {
