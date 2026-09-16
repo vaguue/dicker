@@ -1,0 +1,11 @@
+prefix=/Users/seva/seva/ctf/boynextdoor/dicker/cxx_modules/wolfssl/aarch64-macos
+exec_prefix=${prefix}
+libdir=${exec_prefix}/lib
+includedir=${prefix}/include
+
+Name: wolfssl
+Description: wolfssl C library.
+Version: 5.7.4
+Libs: -L${libdir} -lwolfssl
+Libs.private: 
+Cflags: -I${includedir}
