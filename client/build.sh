@@ -26,8 +26,8 @@ if [ -n "$TARGET" ]; then
   SUFFIX="$TARGET"
 fi
 
-OSSLDIR="../out/openssl-$SUFFIX"
-INC="$INC -I$OSSLDIR/include"
+WOLFDIR="$MODS/wolfssl/$SUFFIX"
+INC="$INC -I$WOLFDIR/include"
 
 # dead-strip + symbol strip: ELF/COFF via lld take --gc-sections -s; mach-o ld64
 # uses -dead_strip.
@@ -71,8 +71,8 @@ if [ ! -f "$LIBV" ]; then
   zig ar rcs "$LIBV" $OBJS
 fi
 
-../build-openssl.sh "${TARGET:-}"
+../build-wolfssl.sh "${TARGET:-}"
 
 echo "[*] linking $OUT"
-zig c++ $TARGETFLAG $STD $OPT $SEC -Wall $INC cli.cxx "$LIBV" -L"$OSSLDIR/lib" -lssl -lcrypto $EXTRA_LIBS $SIZEOPT -o "$OUT"
+zig c++ $TARGETFLAG $STD $OPT $SEC -Wall $INC cli.cxx "$LIBV" -L"$WOLFDIR/lib" -lwolfssl $EXTRA_LIBS $SIZEOPT -o "$OUT"
 echo "[+] built ./$OUT"

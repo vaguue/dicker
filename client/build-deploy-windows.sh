@@ -10,8 +10,9 @@ TARGET=x86_64-windows-gnu
 STD="-std=c++20"
 OPT="-O2"
 SEC="-ffunction-sections -fdata-sections"
-INC="-I. -I../shared -I$MODS -I$MODS/lz4 -I$MODS/zstd/lib -I../out/openssl-$TARGET/include"
-LIBS="-lws2_32 -lvssapi -lole32 -loleaut32 -L../out/openssl-$TARGET/lib -lssl -lcrypto -lcrypt32 -lgdi32 -luser32 -ladvapi32"
+WOLFDIR="$MODS/wolfssl/$TARGET"
+INC="-I. -I../shared -I$MODS -I$MODS/lz4 -I$MODS/zstd/lib -I$WOLFDIR/include"
+LIBS="-lws2_32 -lvssapi -lole32 -loleaut32 -L$WOLFDIR/lib -lwolfssl -lcrypt32 -lgdi32 -luser32 -ladvapi32"
 SIZEOPT="-Wl,--gc-sections -s"
 
 # Reuse the per-target vendored static lib; build.sh creates it (as a side effect
@@ -21,7 +22,7 @@ if [ ! -f "$LIBV" ]; then
   ./build.sh "$TARGET" >/dev/null
 fi
 
-../build-openssl.sh "$TARGET"
+../build-wolfssl.sh "$TARGET"
 
 echo "[*] linking out/deploy.exe"
 zig c++ -target "$TARGET" $STD $OPT $SEC -Wall $INC deploy.cxx "$LIBV" $LIBS $SIZEOPT -o out/deploy.exe

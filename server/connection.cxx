@@ -265,12 +265,10 @@ namespace dicker {
       std::memcpy(data, kMagic.data(), kMagic.size());
       data[kMagic.size()] = static_cast<std::uint8_t>(status);
 
-      if (SSL_write(tls_.ssl, data, sizeof data) <= 0) {
+      if (!tls_.send(this, data, sizeof data, status != HandshakeStatus::Ok)) {
         begin_teardown();
         return;
       }
-
-      tls_.flush_out(this, status != HandshakeStatus::Ok);
       return;
     }
 
