@@ -62,6 +62,12 @@ across connections and arrive out of order (reassembled by `pwrite` at offset).
 
 On non-zero status the server closes the connection.
 
+## Cmd (for now only one command, the upload itself)
+
+| field       | size | notes                                             |
+|-------------|------|---------------------------------------------------|
+| cmd         | 1    | 0x33 for Upload                                   |
+
 ## Units (client -> server, repeated after an OK handshake)
 
 A unit is a small header, then a **block stream**, then an optional checksum
