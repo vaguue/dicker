@@ -1,4 +1,4 @@
-prefix=/Users/seva/seva/ctf/boynextdoor/dicker/cxx_modules/wolfssl/x86_64-windows-gnu
+prefix=/Users/seva/seva/open-source/dicker/cxx_modules/wolfssl/x86_64-windows-gnu
 exec_prefix=${prefix}
 libdir=${exec_prefix}/lib
 includedir=${prefix}/include

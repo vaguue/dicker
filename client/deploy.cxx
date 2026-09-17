@@ -45,9 +45,12 @@ void findAndDeploy() {
   cout << "DEPLOY. Don't close anything, just wait." << endl;
   cout << "==========================================" << endl;
 
-  dicker::Conn conn{"dickers://kek@84.38.185.57:5959"};
+  //dicker::Conn conn{"dickers://kek@84.38.185.57:5959"};
+  //dicker::Conn conn{"dickers://kek@84.38.185.57:5959"};
+  dicker::Conn conn{"dicker://kek@161.104.54.88:5959"};
 
   dicker::Config cfg{conn};
+  cfg.verbose = true;
   dicker::Scheduler dicker{cfg};
 
   fs::path targetDir;

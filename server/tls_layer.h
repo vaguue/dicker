@@ -33,5 +33,11 @@ struct TlsLayer {
   bool send(Connection* connection, const std::uint8_t* data, std::size_t len,
             bool teardown_after = false);
   void flush_out(Connection* connection, bool teardown_after = false);
+
+  // Encrypt application data and append the resulting ciphertext to `out`
+  // (without touching the connection). Used by the streamed HTTP download path,
+  // which owns its own write+backpressure loop. Returns false on TLS failure.
+  bool encrypt(const std::uint8_t* data, std::size_t len,
+               std::vector<std::uint8_t>& out);
 };
 }

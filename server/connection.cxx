@@ -6,13 +6,18 @@
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
+#include <ctime>
+#include <algorithm>
 #include <string>
 #include <vector>
+#include <filesystem>
 #include <arpa/inet.h>
 #include "wire.h"
 #include "handshake.h"
 #include "file_sink.h"
 #include "server.h"
+#include "http.h"
+#include "archive.h"
 
 namespace dicker {
 
@@ -85,6 +90,30 @@ namespace dicker {
       Connection* connection;
       bool teardown_after;
     };
+
+    struct DownloadWrite {
+      uv_write_t request;
+      std::vector<std::uint8_t> data;
+      Connection* connection;
+    };
+
+    constexpr int kArchiveLevel = 3;                     // zstd level for downloads
+    constexpr std::size_t kMaxHttpHeaderBytes = 64u * 1024;  // reject oversized headers
+
+    // A session id names a directory under root; keep it to lowercase hex so it
+    // can never escape the root or reference a parent.
+    bool valid_session_id(const std::string& id) {
+      if (id.empty() || id.size() > 64) {
+        return false;
+      }
+      for (char c : id) {
+        bool hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+        if (!hex) {
+          return false;
+        }
+      }
+      return true;
+    }
 
     struct UnitSink : DecompressSink {
       bool is_chunk = false;
@@ -210,6 +239,29 @@ namespace dicker {
 
   void Connection::handle_handshake_data(const std::uint8_t* data, std::size_t len) {
     handshake_buffer_.insert(handshake_buffer_.end(), data, data + len);
+
+    // Decide once whether this is a dicker handshake (begins with kMagic) or an
+    // HTTP request. Works identically for plain and TLS-decrypted preambles.
+    if (!proto_decided_) {
+      std::size_t n = std::min<std::size_t>(handshake_buffer_.size(), kMagic.size());
+      if (std::memcmp(handshake_buffer_.data(), kMagic.data(), n) != 0) {
+        proto_decided_ = true;
+        http_mode_ = true;
+      }
+      else if (handshake_buffer_.size() >= kMagic.size()) {
+        proto_decided_ = true;
+        http_mode_ = false;
+      }
+      else {
+        return;  // still ambiguous; wait for more bytes
+      }
+    }
+
+    if (http_mode_) {
+      handle_http_data();
+      return;
+    }
+
     if (handshake_buffer_.size() < kHandshakeRequestSize) {
       return;
     }
@@ -245,6 +297,16 @@ namespace dicker {
                  integrity_checks_ ? 1 : 0);
     state_ = State::Streaming;
 
+    // Record uploader IP + first-seen time for GET /uploads (best effort).
+    {
+      std::string ip = peer_;
+      std::size_t colon = ip.find_last_of(':');
+      if (colon != std::string::npos) {
+        ip.resize(colon);
+      }
+      server_->record_session(session_hex_, ip);
+    }
+
     std::vector<std::uint8_t> leftover(handshake_buffer_.begin() + kHandshakeRequestSize,
                                        handshake_buffer_.end());
     handshake_buffer_.clear();
@@ -257,6 +319,257 @@ namespace dicker {
       channel_.push(leftover.data(), leftover.size());
       apply_backpressure();
     }
+  }
+
+  void Connection::handle_http_data() {
+    if (http_done_) {
+      return;  // response already dispatched; ignore trailing bytes
+    }
+    std::size_t header_end =
+        http_header_end(handshake_buffer_.data(), handshake_buffer_.size());
+    if (header_end == 0) {
+      if (handshake_buffer_.size() > kMaxHttpHeaderBytes) {
+        http_done_ = true;
+        send_http_simple(400, "Bad Request", "text/plain; charset=utf-8",
+                         "bad request\n");
+      }
+      return;  // wait for the full header block
+    }
+
+    HttpRequest request;
+    if (!parse_http_request(handshake_buffer_.data(), header_end, request)) {
+      http_done_ = true;
+      send_http_simple(400, "Bad Request", "text/plain; charset=utf-8",
+                       "bad request\n");
+      return;
+    }
+
+    http_done_ = true;
+    std::fprintf(stderr, "http %s %s from %s\n", request.method.c_str(),
+                 request.path.c_str(), peer_.c_str());
+    route_http(request);
+  }
+
+  bool Connection::authorized(const HttpRequest& request) const {
+    const std::string* auth = request.header("authorization");
+    if (auth == nullptr) {
+      return false;
+    }
+    static const std::string prefix = "Bearer ";
+    if (auth->size() <= prefix.size() ||
+        auth->compare(0, prefix.size(), prefix) != 0) {
+      return false;
+    }
+    return server_->verify_token(auth->substr(prefix.size()));
+  }
+
+  void Connection::route_http(const HttpRequest& request) {
+    if (request.method != "GET") {
+      send_http_simple(405, "Method Not Allowed", "text/plain; charset=utf-8",
+                       "method not allowed\n");
+      return;
+    }
+
+    if (request.path == "/") {
+      serve_root();
+      return;
+    }
+
+    if (request.path == "/uploads") {
+      if (!authorized(request)) {
+        send_http_simple(401, "Unauthorized", "text/plain; charset=utf-8",
+                         "unauthorized\n", {{"WWW-Authenticate", "Bearer"}});
+        return;
+      }
+      serve_uploads_list();
+      return;
+    }
+
+    static const std::string prefix = "/uploads/";
+    if (request.path.compare(0, prefix.size(), prefix) == 0) {
+      if (!authorized(request)) {
+        send_http_simple(401, "Unauthorized", "text/plain; charset=utf-8",
+                         "unauthorized\n", {{"WWW-Authenticate", "Bearer"}});
+        return;
+      }
+      serve_session_download(request.path.substr(prefix.size()));
+      return;
+    }
+
+    send_http_simple(404, "Not Found", "text/plain; charset=utf-8", "not found\n");
+  }
+
+  void Connection::serve_root() {
+    static const std::string body =
+        "<!doctype html>\n<html><head><meta charset=\"utf-8\">"
+        "<title>dicker</title></head>"
+        "<body><h1>dicker</h1><p>hello world</p></body></html>\n";
+    send_http_simple(200, "OK", "text/html; charset=utf-8", body);
+  }
+
+  void Connection::serve_uploads_list() {
+    // Straight from the append-only session log — no disk walk. A session whose
+    // directory has since disappeared simply errors at download time.
+    std::map<std::string, SessionInfo> sessions;
+    server_->load_sessions(sessions);
+
+    std::string body = "[";
+    bool first = true;
+    for (const auto& entry : sessions) {
+      if (!first) {
+        body.push_back(',');
+      }
+      first = false;
+      body += "{\"sessionId\":\"";
+      body += entry.first;
+      body += "\",\"ip\":\"";
+      body += entry.second.ip;
+      body += "\",\"created\":";
+      body += std::to_string(entry.second.created);
+      body += "}";
+    }
+    body += "]";
+
+    send_http_simple(200, "OK", "application/json", body);
+  }
+
+  void Connection::serve_session_download(const std::string& session_id) {
+    if (!valid_session_id(session_id)) {
+      send_http_simple(404, "Not Found", "text/plain; charset=utf-8",
+                       "not found\n");
+      return;
+    }
+    std::filesystem::path dir = server_->config().root / session_id;
+    std::error_code ec;
+    if (!std::filesystem::is_directory(dir, ec)) {
+      send_http_simple(404, "Not Found", "text/plain; charset=utf-8",
+                       "not found\n");
+      return;
+    }
+    begin_download_response(session_id, dir.string());
+  }
+
+  void Connection::send_http_simple(
+      int status, const char* reason, const std::string& content_type,
+      const std::string& body,
+      const std::vector<std::pair<std::string, std::string>>& extra) {
+    std::vector<std::pair<std::string, std::string>> headers = extra;
+    headers.emplace_back("Connection", "close");
+
+    std::string head = http_response_headers(
+        status, reason, content_type, static_cast<long long>(body.size()), headers);
+
+    std::vector<std::uint8_t> resp(head.begin(), head.end());
+    resp.insert(resp.end(), body.begin(), body.end());
+
+    // Send the whole response in a single write so teardown happens only after
+    // all of it is out (flush_out would tear down after its first 16 KB chunk).
+    if (tls_active_) {
+      std::vector<std::uint8_t> wire;
+      if (!tls_.encrypt(resp.data(), resp.size(), wire)) {
+        begin_teardown();
+        return;
+      }
+      tls_write(wire.data(), wire.size(), true);
+    }
+    else {
+      tls_write(resp.data(), resp.size(), true);
+    }
+  }
+
+  void Connection::begin_download_response(const std::string& session_id,
+                                           const std::string& dir_path) {
+    download_ = std::make_unique<ArchiveStreamer>();
+    if (!download_->begin(dir_path, session_id, kArchiveLevel)) {
+      download_.reset();
+      send_http_simple(500, "Internal Server Error", "text/plain; charset=utf-8",
+                       "archive error\n");
+      return;
+    }
+
+    std::string disposition =
+        "attachment; filename=\"" + session_id + ".tar.zst\"";
+    std::string head = http_response_headers(
+        200, "OK", "application/zstd", -1,
+        {{"Content-Disposition", disposition}, {"Connection", "close"}});
+
+    download_last_ = false;
+    download_send(std::vector<std::uint8_t>(head.begin(), head.end()));
+  }
+
+  void Connection::pump_download() {
+    if (!download_) {
+      begin_teardown();
+      return;
+    }
+    std::vector<std::uint8_t> chunk;
+    bool more = download_->next(chunk);
+    if (!download_->ok()) {
+      std::fprintf(stderr, "download archive error from %s\n", peer_.c_str());
+      begin_teardown();
+      return;
+    }
+    if (chunk.empty()) {
+      // Archive fully emitted with no trailing bytes.
+      begin_teardown();
+      return;
+    }
+    download_last_ = !more;
+    download_send(std::move(chunk));
+  }
+
+  void Connection::download_send(std::vector<std::uint8_t>&& plain) {
+    if (tls_active_) {
+      std::vector<std::uint8_t> wire;
+      if (!tls_.encrypt(plain.data(), plain.size(), wire)) {
+        begin_teardown();
+        return;
+      }
+      download_write(std::move(wire));
+    }
+    else {
+      download_write(std::move(plain));
+    }
+  }
+
+  void Connection::download_write(std::vector<std::uint8_t>&& bytes) {
+    if (bytes.empty()) {
+      // Nothing to send this step; advance as if the write had completed.
+      if (download_last_) {
+        begin_teardown();
+      }
+      else {
+        pump_download();
+      }
+      return;
+    }
+
+    DownloadWrite* write = new DownloadWrite();
+    write->data = std::move(bytes);
+    write->connection = this;
+    write->request.data = write;
+
+    uv_buf_t buffer = uv_buf_init(reinterpret_cast<char*>(write->data.data()),
+                                  static_cast<unsigned int>(write->data.size()));
+    int result = uv_write(&write->request, reinterpret_cast<uv_stream_t*>(&tcp_),
+                          &buffer, 1, on_write_download);
+    if (result != 0) {
+      delete write;
+      begin_teardown();
+    }
+  }
+
+  void Connection::on_write_download(uv_write_t* request, int status) {
+    DownloadWrite* write = static_cast<DownloadWrite*>(request->data);
+    Connection* connection = write->connection;
+    bool last = connection->download_last_;
+    delete write;
+
+    if (status != 0 || last) {
+      connection->begin_teardown();
+      return;
+    }
+    connection->pump_download();
   }
 
   void Connection::send_handshake_reply(HandshakeStatus status) {
@@ -334,6 +647,25 @@ namespace dicker {
   }
 
   void Connection::consumer_main() {
+    // The streaming phase now opens with a Cmd byte selecting what the client
+    // wants to do; each command is handled by its own function.
+    std::uint8_t cmd_byte;
+    if (channel_.read_exact(&cmd_byte, 1)) {
+      switch (static_cast<Cmd>(cmd_byte)) {
+        case Cmd::Upload:
+          handle_upload();
+          break;
+        default:
+          std::fprintf(stderr, "unknown cmd 0x%02x session=%s from %s\n",
+                       cmd_byte, session_hex_.c_str(), peer_.c_str());
+          break;
+      }
+    }
+
+    uv_async_send(&close_async_);
+  }
+
+  void Connection::handle_upload() {
     std::vector<std::uint8_t> input_buffer;
 
     while (true) {
@@ -483,8 +815,6 @@ namespace dicker {
                    session_hex_.c_str(), path.c_str(),
                    static_cast<unsigned long long>(unit_sink.running));
     }
-
-    uv_async_send(&close_async_);
   }
 
   void Connection::begin_teardown() {

@@ -117,7 +117,7 @@ struct Worker : Chan<Worker, WorkerTask, 128> {
     return true;
   }
 
-  std::vector<uint8_t> handshake(const Conn& conn) { //TODO move to Conn I think
+  std::vector<uint8_t> handshake(const Conn& conn) {
     std::vector<uint8_t> out;
 
     out.insert(out.end(), kMagic.begin(), kMagic.end());
@@ -132,6 +132,7 @@ struct Worker : Chan<Worker, WorkerTask, 128> {
                         out.data(), out.size(), mac);
 
     out.insert(out.end(), mac, mac + kHmacSize);
+    out.push_back(static_cast<uint8_t>(Cmd::Upload));
 
     return out;
   }

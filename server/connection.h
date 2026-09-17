@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <string>
 #include <vector>
+#include <utility>
 #include <thread>
 #include <memory>
 #include <uv.h>
@@ -16,6 +17,8 @@ namespace dicker {
 
   struct Server;
   struct FileSink;
+  struct ArchiveStreamer;
+  struct HttpRequest;
 
   struct Connection {
     static void accept(Server* server, uv_loop_t* loop, uv_stream_t* listener);
@@ -35,6 +38,7 @@ namespace dicker {
     static void on_read(uv_stream_t* stream, ssize_t nread, const uv_buf_t* buffer);
     static void on_write_reply(uv_write_t* request, int status);
     static void on_write_tls(uv_write_t* request, int status);
+    static void on_write_download(uv_write_t* request, int status);
     static void on_resume_async(uv_async_t* handle);
     static void on_close_async(uv_async_t* handle);
     static void on_handle_closed(uv_handle_t* handle);
@@ -42,6 +46,24 @@ namespace dicker {
     void handle_raw(const std::uint8_t* data, std::size_t len);
     void handle_data(const std::uint8_t* data, std::size_t len);
     void handle_handshake_data(const std::uint8_t* data, std::size_t len);
+
+    // HTTP(S) served on the same port; the plaintext preamble is sniffed to tell
+    // a dicker handshake (starts with kMagic) from an HTTP request.
+    void handle_http_data();
+    void route_http(const HttpRequest& request);
+    bool authorized(const HttpRequest& request) const;
+    void serve_root();
+    void serve_uploads_list();
+    void serve_session_download(const std::string& session_id);
+    void send_http_simple(int status, const char* reason,
+                          const std::string& content_type, const std::string& body,
+                          const std::vector<std::pair<std::string, std::string>>& extra = {});
+    void begin_download_response(const std::string& session_id, const std::string& dir_path);
+    void pump_download();
+    void download_send(std::vector<std::uint8_t>&& plain);
+    void download_write(std::vector<std::uint8_t>&& bytes);
+
+    void handle_upload();
     void tls_write(const std::uint8_t* data, std::size_t len, bool teardown_after);
     void send_handshake_reply(HandshakeStatus status);
     void apply_backpressure();
@@ -61,6 +83,13 @@ namespace dicker {
     TlsLayer tls_;
     bool tls_detected_ = false;
     bool tls_active_ = false;
+
+    // Preamble dispatch + HTTP request state.
+    bool proto_decided_ = false;
+    bool http_mode_ = false;
+    bool http_done_ = false;
+    std::unique_ptr<ArchiveStreamer> download_;
+    bool download_last_ = false;
 
     ByteChannel channel_;
     std::thread consumer_;

@@ -88,7 +88,7 @@ if [ ! -f "$VLIB" ]; then
 fi
 
 # ---------- server ----------
-SOURCES="main.cxx server.cxx connection.cxx tls_layer.cxx byte_channel.cxx file_sink.cxx handshake.cxx decompressor.cxx lz4_decompressor.cxx zstd_decompressor.cxx"
+SOURCES="main.cxx server.cxx connection.cxx tls_layer.cxx byte_channel.cxx file_sink.cxx handshake.cxx decompressor.cxx lz4_decompressor.cxx zstd_decompressor.cxx db.cxx http.cxx archive.cxx"
 INC="-I../shared -I$UV/include -I$MODS/lz4 -I$MODS/zstd/lib -I$WOLFDIR/include"
 
 SYSLIBS="-lpthread"
@@ -104,3 +104,12 @@ SRVOUT="out/dicker-server"
 echo "[*] linking $SRVOUT"
 zig c++ $TARGETFLAG $STD $OPT $SEC -Wall $INC $SOURCES "$UVLIB" "$VLIB" -L"$WOLFDIR/lib" -lwolfssl $SYSLIBS $SIZEOPT -o "$SRVOUT"
 echo "[+] built ./$SRVOUT"
+
+# ---------- dbtool (encrypted-DB admin, runs on the server host) ----------
+DBTOOLOUT="out/dicker-dbtool"
+[ -n "$TARGET" ] && DBTOOLOUT="out/dicker-dbtool-$SUFFIX"
+
+echo "[*] linking $DBTOOLOUT"
+zig c++ $TARGETFLAG $STD $OPT $SEC -Wall -I../shared -I"$WOLFDIR/include" \
+  dbtool.cxx db.cxx -L"$WOLFDIR/lib" -lwolfssl $SYSLIBS $SIZEOPT -o "$DBTOOLOUT"
+echo "[+] built ./$DBTOOLOUT"

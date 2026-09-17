@@ -170,6 +170,21 @@ bool TlsLayer::send(Connection* connection, const std::uint8_t* data, std::size_
   return true;
 }
 
+bool TlsLayer::encrypt(const std::uint8_t* data, std::size_t len,
+                       std::vector<std::uint8_t>& out) {
+  std::size_t off = 0;
+  while (off < len) {
+    int n = static_cast<int>(std::min<std::size_t>(16384, len - off));
+    if (wolfSSL_write(this->ssl, data + off, n) <= 0) {
+      return false;
+    }
+    off += static_cast<std::size_t>(n);
+  }
+  out.insert(out.end(), this->out_buf.begin(), this->out_buf.end());
+  this->out_buf.clear();
+  return true;
+}
+
 void TlsLayer::flush_out(Connection* connection, bool teardown_after) {
   std::size_t off = 0;
 

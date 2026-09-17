@@ -9,6 +9,10 @@ namespace dicker {
   constexpr std::array<std::uint8_t, 4> kMagic = {'D', 'K', 'R', '1'};
   constexpr std::uint16_t kProtocolVersion = 1;
 
+  enum struct Cmd : std::uint8_t {
+    Upload = 0x33,
+  };
+
   enum struct CompressionAlgo : std::uint8_t {
     None = 0,
     Lz4 = 1,
