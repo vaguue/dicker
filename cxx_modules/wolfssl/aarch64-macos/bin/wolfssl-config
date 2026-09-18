@@ -4,7 +4,7 @@ package="wolfssl"
 version="5.7.4"
 libs="-lwolfssl -lpthread"
  
-prefix="/Users/seva/seva/ctf/boynextdoor/dicker/cxx_modules/wolfssl/aarch64-macos"
+prefix="/Users/seva/seva/open-source/dicker/cxx_modules/wolfssl/aarch64-macos"
 exec_prefix="${prefix}"
 bindir="${exec_prefix}/bin"
 sbindir="${exec_prefix}/sbin"

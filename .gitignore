@@ -4,3 +4,5 @@ dist/
 out/
 tcpdump.txt
 deepseek.sh
+dwn/
+systemd.sh
