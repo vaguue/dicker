@@ -26,7 +26,7 @@ const server_targets = [_][]const u8{
 };
 
 const client_cxx_flags = [_][]const u8{ "-std=c++20", "-Wall", "-ffunction-sections", "-fdata-sections" };
-const server_cxx_flags = [_][]const u8{ "-std=c++17", "-Wall", "-ffunction-sections", "-fdata-sections" };
+const server_cxx_flags = [_][]const u8{ "-std=c++20", "-Wall", "-ffunction-sections", "-fdata-sections" };
 const vendor_c_flags = [_][]const u8{ "-w", "-ffunction-sections", "-fdata-sections" };
 
 const Deps = struct {
@@ -275,7 +275,6 @@ const libuv_darwin_sources = [_][]const u8{
 };
 
 const server_sources = [_][]const u8{
-  "server/main.cxx",
   "server/server.cxx",
   "server/connection.cxx",
   "server/tls_layer.cxx",
@@ -297,6 +296,8 @@ pub fn build(b: *std.Build) void {
   const debug = b.option(bool, "debug", "dev build: keep symbols, no optimization/strip") orelse false;
   const default_optimize: std.builtin.OptimizeMode = if (debug) .Debug else .ReleaseFast;
   const optimize = b.option(std.builtin.OptimizeMode, "optimize", "Optimization mode (default ReleaseFast, Debug with -Ddebug)") orelse default_optimize;
+  const is_root = b.pkg_hash.len == 0;
+  const with_server = b.option(bool, "server", "Build the dicker-server library (needs libuv); on by default for this repo") orelse is_root;
 
   const deps: Deps = .{
     .muypoco = b.dependency("muypoco", .{}),
@@ -305,10 +306,16 @@ pub fn build(b: *std.Build) void {
     .wolfssl = b.dependency("wolfssl", .{}),
   };
 
-  const library = dickerLibrary(b, deps, target, optimize);
-  b.installArtifact(library);
+  const client_library = clientLibrary(b, deps, target, optimize);
+  installLibrary(b, client_library, "../client/out");
 
-  if (b.pkg_hash.len != 0) {
+  const server_library = if (with_server) serverLibrary(b, client_library, target, optimize) else null;
+
+  if (server_library) |library| {
+    installLibrary(b, library, "../server/out");
+  }
+
+  if (!is_root) {
     return;
   }
 
@@ -316,25 +323,53 @@ pub fn build(b: *std.Build) void {
   const server_step = b.step("server", "Build the server binaries (dicker-server, dicker-dbtool)");
   const release_step = b.step("release", "Cross-build the full matrix into client/out and server/out");
 
-  addClientArtifacts(b, library, target, optimize, client_step);
+  addClientArtifacts(b, client_library, target, optimize, client_step, true);
   b.getInstallStep().dependOn(client_step);
 
-  if (addServerArtifacts(b, library, target, optimize, server_step)) {
+  if (server_library) |library| {
+    addServerArtifacts(b, library, target, optimize, server_step, true);
     b.getInstallStep().dependOn(server_step);
   }
 
   for (client_targets) |triple| {
     const resolved = resolveTriple(b, triple);
-    addClientArtifacts(b, dickerLibrary(b, deps, resolved, .ReleaseFast), resolved, .ReleaseFast, release_step);
+    addClientArtifacts(b, clientLibrary(b, deps, resolved, .ReleaseFast), resolved, .ReleaseFast, release_step, false);
   }
   for (server_targets) |triple| {
     const resolved = resolveTriple(b, triple);
-    _ = addServerArtifacts(b, dickerLibrary(b, deps, resolved, .ReleaseFast), resolved, .ReleaseFast, release_step);
+    const library = serverLibrary(b, clientLibrary(b, deps, resolved, .ReleaseFast), resolved, .ReleaseFast) orelse continue;
+    addServerArtifacts(b, library, resolved, .ReleaseFast, release_step, false);
   }
 }
 
-fn dickerLibrary(b: *std.Build, deps: Deps, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step.Compile {
-  const module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true });
+fn installLibrary(b: *std.Build, library: *std.Build.Step.Compile, out_dir: []const u8) void {
+  const install = b.addInstallArtifact(library, .{
+    .dest_dir = .{ .override = .{ .custom = out_dir } },
+    .h_dir = .{ .override = .{ .custom = b.fmt("{s}/include", .{out_dir}) } },
+  });
+  b.getInstallStep().dependOn(&install.step);
+}
+
+fn withCryptoExtensions(b: *std.Build, target: std.Build.ResolvedTarget) std.Build.ResolvedTarget {
+  var query = target.query;
+
+  switch (wolfConfig(target)) {
+    .x86_64 => {
+      query.cpu_features_add.addFeatureSet(std.Target.x86.featureSet(&.{ .aes, .pclmul, .sse4_2 }));
+    },
+    .aarch64_linux => {
+      query.cpu_features_add.addFeatureSet(std.Target.aarch64.featureSet(&.{ .aes, .sha2 }));
+    },
+    else => {
+      return target;
+    },
+  }
+
+  return b.resolveTargetQuery(query);
+}
+
+fn clientLibrary(b: *std.Build, deps: Deps, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step.Compile {
+  const module = b.createModule(.{ .target = withCryptoExtensions(b, target), .optimize = optimize, .link_libc = true });
 
   addZstd(module, deps.zstd);
   addLz4(module, deps.lz4);
@@ -384,7 +419,7 @@ fn wolfConfig(target: std.Build.ResolvedTarget) WolfConfig {
   const result = target.result;
 
   return switch (result.cpu.arch) {
-    .x86_64 => .x86_64,
+    .x86_64 => if (result.os.tag == .windows) .portable else .x86_64,
     .aarch64 => switch (result.os.tag) {
       .macos, .ios => .aarch64_apple,
       .linux => .aarch64_linux,
@@ -479,8 +514,8 @@ fn addWolfssl(b: *std.Build, module: *std.Build.Module, wolfssl: *std.Build.Depe
   return options;
 }
 
-fn addLibuv(b: *std.Build, module: *std.Build.Module, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) bool {
-  const libuv = b.lazyDependency("libuv", .{}) orelse return false;
+fn libuvLibrary(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) ?*std.Build.Step.Compile {
+  const libuv = b.lazyDependency("libuv", .{}) orelse return null;
   const os = target.result.os.tag;
   const uv = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true });
 
@@ -515,9 +550,37 @@ fn addLibuv(b: *std.Build, module: *std.Build.Module, target: std.Build.Resolved
 
   uv.addCSourceFiles(.{ .root = libuv.path(""), .files = files.items, .flags = flags.items, .language = .c });
 
-  module.addIncludePath(libuv.path("include"));
-  module.linkLibrary(b.addLibrary(.{ .name = "uv", .root_module = uv, .linkage = .static }));
-  return true;
+  const library = b.addLibrary(.{ .name = "uv", .root_module = uv, .linkage = .static });
+  library.installHeadersDirectory(libuv.path("include"), "", .{});
+  return library;
+}
+
+fn serverLibrary(
+  b: *std.Build,
+  client_library: *std.Build.Step.Compile,
+  target: std.Build.ResolvedTarget,
+  optimize: std.builtin.OptimizeMode,
+) ?*std.Build.Step.Compile {
+  const uv = libuvLibrary(b, target, optimize) orelse return null;
+  const module = b.createModule(.{ .target = target, .optimize = optimize, .link_libcpp = true });
+
+  module.addCSourceFiles(.{ .files = &server_sources, .flags = &server_cxx_flags, .language = .cpp });
+  module.addCSourceFiles(.{ .files = listPaths(b, "server/controllers", ".cxx"), .flags = &server_cxx_flags, .language = .cpp });
+  module.addCSourceFiles(.{ .files = listPaths(b, "server/middleware", ".cxx"), .flags = &server_cxx_flags, .language = .cpp });
+  module.addIncludePath(b.path("server"));
+  module.addIncludePath(b.path("shared"));
+  module.addIncludePath(b.path("cxx_modules"));
+  module.linkLibrary(client_library);
+  module.linkLibrary(uv);
+
+  const library = b.addLibrary(.{ .name = "dicker-server", .root_module = module, .linkage = .static });
+
+  library.installHeadersDirectory(b.path("server"), "dicker", .{ .include_extensions = &.{".h"} });
+  library.installHeadersDirectory(b.path("shared"), "dicker", .{ .include_extensions = &.{".h"} });
+  library.installLibraryHeaders(client_library);
+  library.installLibraryHeaders(uv);
+
+  return library;
 }
 
 fn addClientArtifacts(
@@ -526,9 +589,15 @@ fn addClientArtifacts(
   target: std.Build.ResolvedTarget,
   optimize: std.builtin.OptimizeMode,
   step: *std.Build.Step,
+  examples: bool,
 ) void {
   for (listFiles(b, "client", ".cxx")) |file| {
     const stem = std.fs.path.stem(file);
+
+    if (!examples and std.mem.eql(u8, stem, "example")) {
+      continue;
+    }
+
     const name = if (std.mem.eql(u8, stem, "cli")) "dicker" else stem;
     const executable = clientExecutable(b, library, target, optimize, name, b.fmt("client/{s}", .{file}));
 
@@ -554,7 +623,7 @@ fn clientExecutable(
   return b.addExecutable(.{ .name = name, .root_module = module });
 }
 
-pub fn linkClientSystemLibraries(b: *std.Build, module: *std.Build.Module, target: std.Build.ResolvedTarget) void {
+fn linkClientSystemLibraries(b: *std.Build, module: *std.Build.Module, target: std.Build.ResolvedTarget) void {
   switch (target.result.os.tag) {
     .windows => {
       for ([_][]const u8{ "ws2_32", "ole32", "oleaut32", "crypt32", "gdi32", "user32", "advapi32" }) |name| {
@@ -583,45 +652,31 @@ fn addServerArtifacts(
   target: std.Build.ResolvedTarget,
   optimize: std.builtin.OptimizeMode,
   step: *std.Build.Step,
-) bool {
-  const server = b.createModule(.{ .target = target, .optimize = optimize, .link_libcpp = true });
-  server.strip = optimize != .Debug;
+  examples: bool,
+) void {
+  const binaries = [_][2][]const u8{
+    .{ "dicker-server", "server/main.cxx" },
+    .{ "dicker-dbtool", "server/dbtool.cxx" },
+    .{ "example", "server/example.cxx" },
+  };
 
-  if (!addLibuv(b, server, target, optimize)) {
-    return false;
-  }
+  for (binaries[0 .. if (examples) binaries.len else binaries.len - 1]) |binary| {
+    const module = b.createModule(.{ .target = target, .optimize = optimize, .link_libcpp = true });
 
-  server.addCSourceFiles(.{ .files = &server_sources, .flags = &server_cxx_flags, .language = .cpp });
-  server.addCSourceFiles(.{ .files = listPaths(b, "server/controllers", ".cxx"), .flags = &server_cxx_flags, .language = .cpp });
-  server.addCSourceFiles(.{ .files = listPaths(b, "server/middleware", ".cxx"), .flags = &server_cxx_flags, .language = .cpp });
-  addServerIncludes(b, server, library);
-  linkServerSystemLibraries(server, target);
-  step.dependOn(installStep(b, b.addExecutable(.{ .name = "dicker-server", .root_module = server }), target, "../server/out"));
+    module.strip = optimize != .Debug;
+    module.addCSourceFiles(.{ .files = &.{binary[1]}, .flags = &server_cxx_flags, .language = .cpp });
+    module.addIncludePath(b.path("server"));
+    module.addIncludePath(b.path("shared"));
+    module.linkLibrary(library);
+    module.linkSystemLibrary("pthread", .{});
 
-  const dbtool = b.createModule(.{ .target = target, .optimize = optimize, .link_libcpp = true });
-  dbtool.strip = optimize != .Debug;
-  dbtool.addCSourceFiles(.{ .files = &.{ "server/dbtool.cxx", "server/db.cxx" }, .flags = &server_cxx_flags, .language = .cpp });
-  addServerIncludes(b, dbtool, library);
-  linkServerSystemLibraries(dbtool, target);
-  step.dependOn(installStep(b, b.addExecutable(.{ .name = "dicker-dbtool", .root_module = dbtool }), target, "../server/out"));
-
-  return true;
-}
-
-fn addServerIncludes(b: *std.Build, module: *std.Build.Module, library: *std.Build.Step.Compile) void {
-  module.addIncludePath(b.path("server"));
-  module.addIncludePath(b.path("shared"));
-  module.addIncludePath(b.path("cxx_modules"));
-  module.linkLibrary(library);
-}
-
-fn linkServerSystemLibraries(module: *std.Build.Module, target: std.Build.ResolvedTarget) void {
-  module.linkSystemLibrary("pthread", .{});
-
-  if (target.result.os.tag == .linux) {
-    for ([_][]const u8{ "dl", "rt" }) |name| {
-      module.linkSystemLibrary(name, .{});
+    if (target.result.os.tag == .linux) {
+      for ([_][]const u8{ "dl", "rt" }) |name| {
+        module.linkSystemLibrary(name, .{});
+      }
     }
+
+    step.dependOn(installStep(b, b.addExecutable(.{ .name = binary[0], .root_module = module }), target, "../server/out"));
   }
 }
 

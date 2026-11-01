@@ -9,10 +9,12 @@
 #include <map>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <filesystem>
 #include <uv.h>
 #include "protocol.h"
 #include "db.h"
+#include "router.h"
 
 namespace dicker {
 
@@ -23,15 +25,34 @@ namespace dicker {
     std::filesystem::path root;
     std::size_t channel_high_water;
     std::size_t channel_low_water;
+    bool default_routes = true;  // serve /, /uploads and /uploads/...
   };
 
   struct Server {
-    Server(uv_loop_t* loop, ServerConfig config);
+    explicit Server(ServerConfig config);
+    ~Server();
 
     Server(const Server&) = delete;
     Server& operator=(const Server&) = delete;
 
     bool listen(const std::string& address, int port);
+
+    // Serves until stop() is called.
+    void run();
+
+    // Makes run() return. Safe to call from any thread, including a route
+    // handler. Meant for shutdown: uploads still in flight are cut off.
+    void stop();
+
+    // Adds an HTTP endpoint, checked before the built-in routes. Plain HTTP and
+    // HTTPS are both served on the listening port. Register before listen().
+    void route(std::string method, std::string path, HttpHandler handler, Chain middleware = {}) {
+      router.add(std::move(method), Match::Exact, std::move(path), std::move(handler), std::move(middleware));
+    }
+
+    void route(std::string method, Match match, std::string path, HttpHandler handler, Chain middleware = {}) {
+      router.add(std::move(method), match, std::move(path), std::move(handler), std::move(middleware));
+    }
 
     const ServerConfig& config() const {
       return config_;
@@ -48,9 +69,13 @@ namespace dicker {
     bool load_sessions(std::map<std::string, SessionInfo>& out) const;
 
     static void on_new_connection(uv_stream_t* server_handle, int status);
+    static void on_stop(uv_async_t* handle);
 
-    uv_loop_t* loop_;
+    uv_loop_t loop_;
+    uv_async_t stop_async_;
+    bool tcp_initialized_ = false;
     ServerConfig config_;
+    Router router;
     uv_tcp_t tcp_server_;
     std::mutex sinks_mutex_;
     std::unordered_map<std::string, std::shared_ptr<FileSink>> sinks_;

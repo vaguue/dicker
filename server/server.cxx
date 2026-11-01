@@ -9,9 +9,16 @@
 
 namespace dicker {
 
-  Server::Server(uv_loop_t* loop, ServerConfig config)
-    : loop_(loop),
-      config_(std::move(config)) {
+  Server::Server(ServerConfig config)
+    : config_(std::move(config)) {
+    uv_loop_init(&loop_);
+    uv_async_init(&loop_, &stop_async_, on_stop);
+    stop_async_.data = this;
+
+    if (config_.default_routes) {
+      add_builtin_routes(router);
+    }
+
     tokens_path_ = (config_.root / ".dicker-tokens.json").string();
     sessions_path_ = (config_.root / ".dicker-sessions.jsonl").string();
 
@@ -66,10 +73,40 @@ namespace dicker {
     return SessionLog::load_all(sessions_path_, config_.key, out);
   }
 
+  Server::~Server() {
+    if (!uv_is_closing(reinterpret_cast<uv_handle_t*>(&stop_async_))) {
+      uv_close(reinterpret_cast<uv_handle_t*>(&stop_async_), nullptr);
+    }
+    if (tcp_initialized_ && !uv_is_closing(reinterpret_cast<uv_handle_t*>(&tcp_server_))) {
+      uv_close(reinterpret_cast<uv_handle_t*>(&tcp_server_), nullptr);
+    }
+    uv_run(&loop_, UV_RUN_NOWAIT);
+    uv_loop_close(&loop_);
+  }
+
+  void Server::run() {
+    uv_run(&loop_, UV_RUN_DEFAULT);
+  }
+
+  void Server::stop() {
+    uv_async_send(&stop_async_);
+  }
+
+  void Server::on_stop(uv_async_t* handle) {
+    Server* self = static_cast<Server*>(handle->data);
+
+    if (self->tcp_initialized_ && !uv_is_closing(reinterpret_cast<uv_handle_t*>(&self->tcp_server_))) {
+      uv_close(reinterpret_cast<uv_handle_t*>(&self->tcp_server_), nullptr);
+    }
+    uv_close(reinterpret_cast<uv_handle_t*>(&self->stop_async_), nullptr);
+    uv_stop(&self->loop_);
+  }
+
   bool Server::listen(const std::string& address, int port) {
-    if (uv_tcp_init(loop_, &tcp_server_) != 0) {
+    if (uv_tcp_init(&loop_, &tcp_server_) != 0) {
       return false;
     }
+    tcp_initialized_ = true;
     tcp_server_.data = this;
 
     struct sockaddr_in bind_address;
@@ -90,7 +127,7 @@ namespace dicker {
       return;
     }
     Server* self = static_cast<Server*>(server_handle->data);
-    Connection::accept(self, self->loop_, server_handle);
+    Connection::accept(self, &self->loop_, server_handle);
   }
 
   std::shared_ptr<FileSink> Server::get_or_create_sink(const std::array<std::uint8_t, kSessionIdSize>& session_id) {
@@ -109,7 +146,7 @@ namespace dicker {
       return nullptr;
     }
 
-    auto sink = std::make_shared<FileSink>(loop_, session_root);
+    auto sink = std::make_shared<FileSink>(&loop_, session_root);
     sinks_.emplace(hex, sink);
     return sink;
   }

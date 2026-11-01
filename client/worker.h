@@ -162,12 +162,12 @@ struct Worker {
   bool process(const Task& t) noexcept {
     const std::string_view path = t.pathname;
 
-    events.emit<"upload.started">(UploadStarted{path, t.type, t.offset, t.length, t.fileSize});
+    events.emit<"upload:started">(UploadStarted{path, t.type, t.offset, t.length, t.fileSize});
 
     uint64_t compressedBytes = 0;
     const bool ok = this->upload(t, compressedBytes);
 
-    events.emit<"upload.finished">(UploadFinished{path, t.type, t.offset, t.length, t.fileSize, compressedBytes, ok});
+    events.emit<"upload:finished">(UploadFinished{path, t.type, t.offset, t.length, t.fileSize, compressedBytes, ok});
     return ok;
   }
 

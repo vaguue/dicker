@@ -19,6 +19,7 @@
 #include "http.h"
 #include "router.h"
 #include "archive.h"
+#include "server_events.h"
 
 namespace dicker {
 
@@ -281,6 +282,8 @@ namespace dicker {
     std::fprintf(stderr, "handshake ok from %s session=%s algo=%s integrity=%d\n",
                  peer_.c_str(), session_hex_.c_str(), algo_name(request.algo),
                  integrity_checks_ ? 1 : 0);
+    server::events.emit<"client:connected">(server::ClientConnected{
+      session_hex_, peer_, algo_name(request.algo), integrity_checks_, tls_active_});
     state_ = State::Streaming;
 
     // Record uploader IP + first-seen time for GET /uploads (best effort).
@@ -613,6 +616,13 @@ namespace dicker {
         std::fprintf(stderr, "recv file session=%s path=%s\n",
                      session_hex_.c_str(), path.c_str());
       }
+      server::events.emit<"upload:started">(server::UploadStarted{
+        session_hex_, peer_, path, type, base_offset});
+
+      auto finished = [&](std::uint64_t wire, std::uint64_t bytes, bool ok, std::string_view reason) {
+        server::events.emit<"upload:finished">(server::UploadFinished{
+          session_hex_, peer_, path, type, base_offset, wire, bytes, ok, reason});
+      };
 
       SequentialWriter sequential;
       OffsetWriter offset;
@@ -621,6 +631,7 @@ namespace dicker {
         if (!sequential.valid()) {
           std::fprintf(stderr, "reject session=%s path=%s (open failed / not permitted)\n",
                        session_hex_.c_str(), path.c_str());
+          finished(0, 0, false, "rejected");
           break;
         }
       }
@@ -629,6 +640,7 @@ namespace dicker {
         if (!offset.valid()) {
           std::fprintf(stderr, "reject session=%s path=%s (open failed / not permitted)\n",
                        session_hex_.c_str(), path.c_str());
+          finished(0, 0, false, "rejected");
           break;
         }
       }
@@ -650,6 +662,7 @@ namespace dicker {
       std::uint64_t unit_wire = 0;
       bool unit_ok = true;
       bool unit_done = false;
+      std::string_view failure = "connection lost";
       while (true) {
         std::uint8_t block_type;
         if (!channel_.read_exact(&block_type, 1)) {
@@ -661,6 +674,7 @@ namespace dicker {
           break;
         }
         if (static_cast<BlockType>(block_type) != BlockType::Data) {
+          failure = "protocol error";
           unit_ok = false;
           break;
         }
@@ -672,6 +686,7 @@ namespace dicker {
         }
         std::uint32_t block_len = read_u32_le(block_len_bytes);
         if (block_len == 0 || block_len > kMaxBlockSize) {
+          failure = "protocol error";
           unit_ok = false;
           break;
         }
@@ -686,6 +701,7 @@ namespace dicker {
         if (!decompressor_->decompress(input_buffer.data(), block_len, unit_sink)) {
           std::fprintf(stderr, "decode error session=%s path=%s\n",
                        session_hex_.c_str(), path.c_str());
+          failure = "decode error";
           unit_ok = false;
           break;
         }
@@ -699,6 +715,7 @@ namespace dicker {
         else if (read_u64_le(checksum_bytes) != XXH64_digest(&checksum_state)) {
           std::fprintf(stderr, "checksum mismatch session=%s path=%s\n",
                        session_hex_.c_str(), path.c_str());
+          failure = "checksum mismatch";
           unit_ok = false;
         }
       }
@@ -708,6 +725,7 @@ namespace dicker {
       }
 
       if (!unit_ok || !unit_done) {
+        finished(unit_wire, unit_sink.running, false, failure);
         break;
       }
 
@@ -717,6 +735,7 @@ namespace dicker {
                    session_hex_.c_str(), path.c_str(),
                    static_cast<unsigned long long>(unit_wire),
                    static_cast<unsigned long long>(unit_sink.running));
+      finished(unit_wire, unit_sink.running, true, "");
     }
   }
 
@@ -778,6 +797,11 @@ namespace dicker {
                    static_cast<unsigned long long>(connection->bytes_total_),
                    static_cast<unsigned long long>(connection->wire_bytes_),
                    ratio);
+      if (!connection->session_hex_.empty()) {
+        server::events.emit<"client:disconnected">(server::ClientDisconnected{
+          connection->session_hex_, connection->peer_, connection->units_done_,
+          connection->bytes_total_, connection->wire_bytes_});
+      }
       delete connection;
     }
   }

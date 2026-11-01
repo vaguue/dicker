@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <vector>
 
 namespace dicker {
 
@@ -26,16 +27,12 @@ namespace dicker {
     void operator()(HttpContext& ctx);
   };
 
-  // A compile-time middleware chain, built from a constexpr array literal (or
-  // {} for none). Deduces its length so route rows stay terse.
-  struct Chain {
-    const Middleware* items;
-    std::size_t count;
+  // A middleware chain: runs in order before the route handler; {} for none.
+  using Chain = std::vector<Middleware>;
 
-    constexpr Chain() : items(nullptr), count(0) {}
-
-    template <std::size_t N>
-    constexpr Chain(const Middleware (&array)[N]) : items(array), count(N) {}
-  };
+  namespace mw {
+    // Rejects requests without a valid bearer token (see dicker-dbtool).
+    void require_auth(HttpContext& ctx, Next& next);
+  }
 
 }

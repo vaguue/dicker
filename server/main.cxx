@@ -2,7 +2,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
-#include <uv.h>
 #include "server.h"
 
 namespace {
@@ -79,29 +78,21 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  uv_loop_t loop;
-  if (uv_loop_init(&loop) != 0) {
-    std::fprintf(stderr, "failed to initialize event loop\n");
-    return 1;
-  }
-
   dicker::ServerConfig config;
   config.key = options.key;
   config.root = options.root;
   config.channel_high_water = options.high_water;
   config.channel_low_water = options.low_water;
 
-  dicker::Server server(&loop, std::move(config));
+  dicker::Server server(std::move(config));
   if (!server.listen(options.listen_address, options.port)) {
     std::fprintf(stderr, "failed to listen on %s:%d\n", options.listen_address.c_str(), options.port);
-    uv_loop_close(&loop);
     return 1;
   }
 
   std::fprintf(stderr, "dicker server listening on %s:%d root=%s\n",
                options.listen_address.c_str(), options.port, options.root.c_str());
 
-  int result = uv_run(&loop, UV_RUN_DEFAULT);
-  uv_loop_close(&loop);
-  return result;
+  server.run();
+  return 0;
 }
