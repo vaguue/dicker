@@ -9,6 +9,7 @@
 #include "chan.h"
 
 namespace dicker {
+
 const size_t PATH_CAP = 256;
 
 struct Task {
@@ -18,7 +19,6 @@ struct Task {
 };
 
 struct WorkerTask : Task {
-  //Completion* completion = nullptr;
   std::shared_ptr<Completion> completion;
 
   WorkerTask() = default;
@@ -36,13 +36,11 @@ struct WorkerTask : Task {
 };
 
 struct ReadRequest : Task {
-  //Completion* completion = nullptr;
   std::shared_ptr<Completion> completion;
 };
 
 struct NetworkTask {
   std::vector<uint8_t> data; //TODO no zero-alloc ;(
-  //Completion* completion = nullptr;
   std::shared_ptr<Completion> completion;
 
   NetworkTask() = default;
@@ -50,4 +48,10 @@ struct NetworkTask {
   NetworkTask(const uint8_t* bytes, size_t len) : data(bytes, bytes + len) {
   }
 };
+
+struct UploaderTask {
+  std::string fn;
+  std::shared_ptr<Completion> completion;
+};
+
 }  // namespace dicker

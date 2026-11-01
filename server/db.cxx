@@ -12,6 +12,8 @@
 #include <wolfssl/wolfcrypt/aes.h>
 #include <wolfssl/wolfcrypt/random.h>
 
+#include "json.hpp"
+
 #include "sha256.h"
 #include "hmac_sha256.h"  // crypto::constant_time_equal
 
@@ -135,153 +137,6 @@ namespace dicker {
       return true;
     }
 
-    // ----- minimal JSON -----
-
-    void json_escape(const std::string& in, std::string& out) {
-      out.push_back('"');
-      for (unsigned char c : in) {
-        switch (c) {
-          case '"': out += "\\\""; break;
-          case '\\': out += "\\\\"; break;
-          case '\b': out += "\\b"; break;
-          case '\f': out += "\\f"; break;
-          case '\n': out += "\\n"; break;
-          case '\r': out += "\\r"; break;
-          case '\t': out += "\\t"; break;
-          default:
-            if (c < 0x20) {
-              char buf[8];
-              std::snprintf(buf, sizeof(buf), "\\u%04x", c);
-              out += buf;
-            }
-            else {
-              out.push_back(static_cast<char>(c));
-            }
-        }
-      }
-      out.push_back('"');
-    }
-
-    struct JsonParser {
-      const std::string& s;
-      std::size_t i = 0;
-      std::string error;
-
-      explicit JsonParser(const std::string& text) : s(text) {}
-
-      void skip_ws() {
-        while (i < s.size()) {
-          char c = s[i];
-          if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
-            ++i;
-          }
-          else {
-            break;
-          }
-        }
-      }
-
-      bool fail(const char* msg) {
-        if (error.empty()) {
-          error = msg;
-        }
-        return false;
-      }
-
-      bool expect(char c) {
-        skip_ws();
-        if (i >= s.size() || s[i] != c) {
-          return fail("unexpected character");
-        }
-        ++i;
-        return true;
-      }
-
-      bool peek(char c) {
-        skip_ws();
-        return i < s.size() && s[i] == c;
-      }
-
-      bool parse_string(std::string& out) {
-        skip_ws();
-        if (i >= s.size() || s[i] != '"') {
-          return fail("expected string");
-        }
-        ++i;
-        out.clear();
-        while (i < s.size()) {
-          char c = s[i++];
-          if (c == '"') {
-            return true;
-          }
-          if (c == '\\') {
-            if (i >= s.size()) {
-              return fail("bad escape");
-            }
-            char e = s[i++];
-            switch (e) {
-              case '"': out.push_back('"'); break;
-              case '\\': out.push_back('\\'); break;
-              case '/': out.push_back('/'); break;
-              case 'b': out.push_back('\b'); break;
-              case 'f': out.push_back('\f'); break;
-              case 'n': out.push_back('\n'); break;
-              case 'r': out.push_back('\r'); break;
-              case 't': out.push_back('\t'); break;
-              case 'u': {
-                if (i + 4 > s.size()) {
-                  return fail("bad \\u");
-                }
-                unsigned code = 0;
-                for (int k = 0; k < 4; ++k) {
-                  char h = s[i++];
-                  code <<= 4;
-                  if (h >= '0' && h <= '9') code |= static_cast<unsigned>(h - '0');
-                  else if (h >= 'a' && h <= 'f') code |= static_cast<unsigned>(h - 'a' + 10);
-                  else if (h >= 'A' && h <= 'F') code |= static_cast<unsigned>(h - 'A' + 10);
-                  else return fail("bad hex");
-                }
-                if (code < 0x80) {
-                  out.push_back(static_cast<char>(code));
-                }
-                else if (code < 0x800) {
-                  out.push_back(static_cast<char>(0xC0 | (code >> 6)));
-                  out.push_back(static_cast<char>(0x80 | (code & 0x3F)));
-                }
-                else {
-                  out.push_back(static_cast<char>(0xE0 | (code >> 12)));
-                  out.push_back(static_cast<char>(0x80 | ((code >> 6) & 0x3F)));
-                  out.push_back(static_cast<char>(0x80 | (code & 0x3F)));
-                }
-                break;
-              }
-              default:
-                return fail("bad escape");
-            }
-          }
-          else {
-            out.push_back(c);
-          }
-        }
-        return fail("unterminated string");
-      }
-
-      bool parse_uint(std::uint64_t& out) {
-        skip_ws();
-        std::size_t start = i;
-        std::uint64_t value = 0;
-        while (i < s.size() && s[i] >= '0' && s[i] <= '9') {
-          value = value * 10 + static_cast<std::uint64_t>(s[i] - '0');
-          ++i;
-        }
-        if (i == start) {
-          return fail("expected number");
-        }
-        out = value;
-        return true;
-      }
-    };
-
   }  // namespace
 
   // ---------------- TokenStore ----------------
@@ -289,72 +144,33 @@ namespace dicker {
   namespace {
 
     std::string tokens_to_json(const std::vector<std::string>& tokens) {
-      std::string out = "{\"tokens\":[";
-      for (std::size_t k = 0; k < tokens.size(); ++k) {
-        if (k != 0) {
-          out.push_back(',');
-        }
-        json_escape(tokens[k], out);
-      }
-      out += "]}";
-      return out;
+      nlohmann::json doc;
+      doc["tokens"] = tokens;
+      return doc.dump();
     }
 
     bool tokens_from_json(const std::string& text, std::vector<std::string>& out,
                           std::string& err) {
-      JsonParser p(text);
       out.clear();
-      if (!p.expect('{')) {
-        err = p.error;
+      nlohmann::json doc = nlohmann::json::parse(text, nullptr, /*allow_exceptions=*/false);
+      if (doc.is_discarded() || !doc.is_object()) {
+        err = "malformed token json";
         return false;
       }
-      if (p.peek('}')) {
-        return true;
+      auto it = doc.find("tokens");
+      if (it == doc.end()) {
+        return true;  // no tokens key -> empty store
       }
-      while (true) {
-        std::string key;
-        if (!p.parse_string(key) || !p.expect(':')) {
-          err = p.error;
-          return false;
-        }
-        if (key == "tokens") {
-          if (!p.expect('[')) {
-            err = p.error;
-            return false;
-          }
-          if (!p.peek(']')) {
-            while (true) {
-              std::string tok;
-              if (!p.parse_string(tok)) {
-                err = p.error;
-                return false;
-              }
-              out.push_back(std::move(tok));
-              if (p.peek(',')) {
-                ++p.i;
-                continue;
-              }
-              break;
-            }
-          }
-          if (!p.expect(']')) {
-            err = p.error;
-            return false;
-          }
-        }
-        else {
-          err = "unexpected key";
-          return false;
-        }
-        if (p.peek(',')) {
-          ++p.i;
-          continue;
-        }
-        break;
-      }
-      if (!p.expect('}')) {
-        err = p.error;
+      if (!it->is_array()) {
+        err = "\"tokens\" is not an array";
         return false;
+      }
+      for (const auto& token : *it) {
+        if (!token.is_string()) {
+          err = "token is not a string";
+          return false;
+        }
+        out.push_back(token.get<std::string>());
       }
       return true;
     }
@@ -479,60 +295,34 @@ namespace dicker {
 
     std::string session_row_to_json(const std::string& session_id,
                                     const std::string& ip, std::uint64_t created) {
-      std::string out = "{\"sessionId\":";
-      json_escape(session_id, out);
-      out += ",\"ip\":";
-      json_escape(ip, out);
-      out += ",\"created\":";
-      out += std::to_string(created);
-      out += "}";
-      return out;
+      nlohmann::ordered_json row;
+      row["sessionId"] = session_id;
+      row["ip"] = ip;
+      row["created"] = created;
+      return row.dump();
     }
 
     bool session_row_from_json(const std::string& text, std::string& session_id,
                                SessionInfo& info) {
-      JsonParser p(text);
-      if (!p.expect('{')) {
+      nlohmann::json row = nlohmann::json::parse(text, nullptr, /*allow_exceptions=*/false);
+      if (row.is_discarded() || !row.is_object()) {
         return false;
       }
-      if (p.peek('}')) {
+      auto id = row.find("sessionId");
+      if (id == row.end() || !id->is_string()) {
         return false;  // need at least sessionId
       }
-      bool have_id = false;
-      while (true) {
-        std::string key;
-        if (!p.parse_string(key) || !p.expect(':')) {
-          return false;
-        }
-        if (key == "sessionId") {
-          if (!p.parse_string(session_id)) {
-            return false;
-          }
-          have_id = true;
-        }
-        else if (key == "ip") {
-          if (!p.parse_string(info.ip)) {
-            return false;
-          }
-        }
-        else if (key == "created") {
-          if (!p.parse_uint(info.created)) {
-            return false;
-          }
-        }
-        else {
-          return false;
-        }
-        if (p.peek(',')) {
-          ++p.i;
-          continue;
-        }
-        break;
+      session_id = id->get<std::string>();
+
+      auto ip = row.find("ip");
+      if (ip != row.end() && ip->is_string()) {
+        info.ip = ip->get<std::string>();
       }
-      if (!p.expect('}')) {
-        return false;
+      auto created = row.find("created");
+      if (created != row.end() && created->is_number_unsigned()) {
+        info.created = created->get<std::uint64_t>();
       }
-      return have_id;
+      return true;
     }
 
   }  // namespace

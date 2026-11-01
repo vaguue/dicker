@@ -180,14 +180,15 @@ inline socket_t tcpConnect(const char* host, const char* port, const Proxy& px =
 
 }
 
-struct NetworkClient : Chan<NetworkClient, NetworkTask, 32> {
+struct NetworkClient : Chan<NetworkClient, NetworkTask, 1024> {
   net::socket_t fd = net::INVALID;
   bool logged_first_send = false;
-  Conn conn;
+  BaseConn conn;
   bool useTls = false;
   TlsSession tls;
 
-  NetworkClient(Conn conn) : conn{conn}, useTls{conn.tls} {}
+  NetworkClient(BaseConn conn) : conn{conn}, useTls{conn.tls} {}
+  NetworkClient(Conn conn) : conn{conn.base()}, useTls{conn.tls} {}
 
   bool init() noexcept {
     this->fd = net::tcpConnect(this->conn.host.c_str(), this->conn.port.c_str(),
@@ -241,6 +242,14 @@ struct NetworkClient : Chan<NetworkClient, NetworkTask, 32> {
       return this->tls.recvExact(buf, len);
     }
     return net::recvExact(this->fd, buf, len);
+  }
+
+  int recvSome(void* buf, size_t len) noexcept {
+    if (this->useTls) {
+      return this->tls.recvSome(buf, len);
+    }
+
+    return net::tcpRecv(this->fd, buf, len, 0);
   }
 };
 }  // namespace dicker

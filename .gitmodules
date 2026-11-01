@@ -1,3 +1,6 @@
 [submodule "cxx_modules/libuv"]
 	path = cxx_modules/libuv
 	url = https://github.com/libuv/libuv
+[submodule "cxx_modules/llhttp"]
+	path = cxx_modules/llhttp
+	url = https://github.com/nodejs/llhttp.git

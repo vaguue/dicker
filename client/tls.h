@@ -146,5 +146,21 @@ struct TlsSession {
 
     return true;
   }
+
+  int recvSome(void* buf, size_t len) {
+    int n = wolfSSL_read(this->ssl, buf, static_cast<int>(len));
+
+    if (n > 0) {
+      return n;
+    }
+
+    int e = wolfSSL_get_error(this->ssl, n);
+
+    if (e == WOLFSSL_ERROR_ZERO_RETURN) {
+      return 0;
+    }
+
+    return -1;
+  }
 };
 }  // namespace dicker

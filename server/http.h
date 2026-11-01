@@ -33,4 +33,9 @@ namespace dicker {
       long long content_length,
       const std::vector<std::pair<std::string, std::string>>& extra = {});
 
+  // A short reason phrase for `status` (e.g. 200 -> "OK"), for building a
+  // response from a status code alone. Unknown codes fall back to a generic
+  // phrase for their class.
+  const char* reason_phrase(int status);
+
 }

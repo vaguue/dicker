@@ -17,6 +17,7 @@
 #include "file_sink.h"
 #include "server.h"
 #include "http.h"
+#include "router.h"
 #include "archive.h"
 
 namespace dicker {
@@ -99,21 +100,6 @@ namespace dicker {
 
     constexpr int kArchiveLevel = 3;                     // zstd level for downloads
     constexpr std::size_t kMaxHttpHeaderBytes = 64u * 1024;  // reject oversized headers
-
-    // A session id names a directory under root; keep it to lowercase hex so it
-    // can never escape the root or reference a parent.
-    bool valid_session_id(const std::string& id) {
-      if (id.empty() || id.size() > 64) {
-        return false;
-      }
-      for (char c : id) {
-        bool hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
-        if (!hex) {
-          return false;
-        }
-      }
-      return true;
-    }
 
     struct UnitSink : DecompressSink {
       bool is_chunk = false;
@@ -347,7 +333,7 @@ namespace dicker {
     http_done_ = true;
     std::fprintf(stderr, "http %s %s from %s\n", request.method.c_str(),
                  request.path.c_str(), peer_.c_str());
-    route_http(request);
+    dispatch_http(*this, request);
   }
 
   bool Connection::authorized(const HttpRequest& request) const {
@@ -361,92 +347,6 @@ namespace dicker {
       return false;
     }
     return server_->verify_token(auth->substr(prefix.size()));
-  }
-
-  void Connection::route_http(const HttpRequest& request) {
-    if (request.method != "GET") {
-      send_http_simple(405, "Method Not Allowed", "text/plain; charset=utf-8",
-                       "method not allowed\n");
-      return;
-    }
-
-    if (request.path == "/") {
-      serve_root();
-      return;
-    }
-
-    if (request.path == "/uploads") {
-      if (!authorized(request)) {
-        send_http_simple(401, "Unauthorized", "text/plain; charset=utf-8",
-                         "unauthorized\n", {{"WWW-Authenticate", "Bearer"}});
-        return;
-      }
-      serve_uploads_list();
-      return;
-    }
-
-    static const std::string prefix = "/uploads/";
-    if (request.path.compare(0, prefix.size(), prefix) == 0) {
-      if (!authorized(request)) {
-        send_http_simple(401, "Unauthorized", "text/plain; charset=utf-8",
-                         "unauthorized\n", {{"WWW-Authenticate", "Bearer"}});
-        return;
-      }
-      serve_session_download(request.path.substr(prefix.size()));
-      return;
-    }
-
-    send_http_simple(404, "Not Found", "text/plain; charset=utf-8", "not found\n");
-  }
-
-  void Connection::serve_root() {
-    static const std::string body =
-        "<!doctype html>\n<html><head><meta charset=\"utf-8\">"
-        "<title>dicker</title></head>"
-        "<body><h1>dicker</h1><p>hello world</p></body></html>\n";
-    send_http_simple(200, "OK", "text/html; charset=utf-8", body);
-  }
-
-  void Connection::serve_uploads_list() {
-    // Straight from the append-only session log — no disk walk. A session whose
-    // directory has since disappeared simply errors at download time.
-    std::map<std::string, SessionInfo> sessions;
-    server_->load_sessions(sessions);
-
-    std::string body = "[";
-    bool first = true;
-    for (const auto& entry : sessions) {
-      if (!first) {
-        body.push_back(',');
-      }
-      first = false;
-      body += "{\"sessionId\":\"";
-      body += entry.first;
-      body += "\",\"ip\":\"";
-      body += entry.second.ip;
-      body += "\",\"created\":";
-      body += std::to_string(entry.second.created);
-      body += "}";
-    }
-    body += "]";
-
-    send_http_simple(200, "OK", "application/json", body);
-  }
-
-  void Connection::serve_session_download(const std::string& session_id) {
-    if (!valid_session_id(session_id)) {
-      send_http_simple(404, "Not Found", "text/plain; charset=utf-8",
-                       "not found\n");
-      return;
-    }
-    std::filesystem::path dir = server_->config().root / session_id;
-    std::error_code ec;
-    if (!std::filesystem::is_directory(dir, ec)) {
-      send_http_simple(404, "Not Found", "text/plain; charset=utf-8",
-                       "not found\n");
-      return;
-    }
-    begin_download_response(session_id, dir.string());
   }
 
   void Connection::send_http_simple(
@@ -747,6 +647,7 @@ namespace dicker {
       unit_sink.integrity = integrity_checks_;
       unit_sink.checksum_state = &checksum_state;
 
+      std::uint64_t unit_wire = 0;
       bool unit_ok = true;
       bool unit_done = false;
       while (true) {
@@ -780,6 +681,7 @@ namespace dicker {
           unit_ok = false;
           break;
         }
+        unit_wire += block_len;
 
         if (!decompressor_->decompress(input_buffer.data(), block_len, unit_sink)) {
           std::fprintf(stderr, "decode error session=%s path=%s\n",
@@ -811,8 +713,9 @@ namespace dicker {
 
       units_done_ += 1;
       bytes_total_ += unit_sink.running;
-      std::fprintf(stderr, "ok session=%s path=%s bytes=%llu\n",
+      std::fprintf(stderr, "ok session=%s path=%s wire=%llu real=%llu\n",
                    session_hex_.c_str(), path.c_str(),
+                   static_cast<unsigned long long>(unit_wire),
                    static_cast<unsigned long long>(unit_sink.running));
     }
   }

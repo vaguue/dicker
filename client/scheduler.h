@@ -22,6 +22,24 @@
 namespace dicker {
 namespace fs = std::filesystem;
 
+inline std::string toUtf8(const fs::path& p) {
+#if defined(__cpp_char8_t)
+  const auto s = p.u8string();
+  return std::string(s.begin(), s.end());
+#else
+  return p.u8string();
+#endif
+}
+
+inline std::string toGenericUtf8(const fs::path& p) {
+#if defined(__cpp_char8_t)
+  const auto s = p.generic_u8string();
+  return std::string(s.begin(), s.end());
+#else
+  return p.generic_u8string();
+#endif
+}
+
 struct FilterRule {
   bool include;
   std::string pattern;
@@ -59,11 +77,11 @@ inline Rule compileRule(const FilterRule& fr) {
   for (std::size_t i = 0; i < pat.size();) {
     char c = pat[i];
     if (c == '*' && i + 1 < pat.size() && pat[i + 1] == '*') {
-      re += ".*";        // ** crosses '/'
+      re += ".*";
       i += 2;
     }
     else if (c == '*') {
-      re += "[^/]*";     // * stays within a segment
+      re += "[^/]*";
       i += 1;
     }
     else if (c == '?') {
@@ -103,7 +121,7 @@ struct Root {
   std::vector<Rule> rules;
 };
 
-struct Scheduler {
+struct Scheduler { //TODO add a stop method
   enum class WorkerState : uint8_t {
     PENDING = 0,
     READY = 1,
@@ -155,7 +173,7 @@ struct Scheduler {
   }
 
   size_t selectWorker(AffinityKey incoming) {
-    size_t chosen = -1;
+    size_t chosen = static_cast<size_t>(-1);
 
     size_t minIdx = static_cast<size_t>(-1);
     size_t minCap = 128;
@@ -228,7 +246,7 @@ struct Scheduler {
 
   void start() {
     if (!this->roots.empty()) {
-      this->storage->snapshot(this->roots.front().path.string().c_str());
+      this->storage->snapshot(toUtf8(this->roots.front().path).c_str());
     }
 
     for (auto& e : readers) {
@@ -250,69 +268,99 @@ struct Scheduler {
     }
   }
 
-  bool run(const Root& root) {
+  bool enqueue(const fs::directory_entry& entry) {
+    const std::string path = toUtf8(entry.path());
+
     std::error_code ec;
-    auto it = fs::recursive_directory_iterator(
-      root.path, fs::directory_options::skip_permission_denied, ec);
+    const uint64_t size = entry.file_size(ec);
+
+    if (ec) {
+      log().error("file_size failed, skipping: %s (%s)", path.c_str(), ec.message().c_str());
+      return true;
+    }
+
+    if (size >= this->cfg.bigFileThreshold) {
+      const uint64_t chunkSize = this->cfg.chunkSize;
+      size_t n = 0;
+
+      for (uint64_t offset = 0; offset < size; offset += chunkSize, ++n) {
+        const uint64_t len = std::min<uint64_t>(chunkSize, size - offset);
+
+        log().info("enqueue chunk: %s", path.c_str());
+
+        WorkerTask task{ dicker::UnitType::Chunk, path.c_str(), static_cast<size_t>(offset), static_cast<size_t>(len) };
+
+        if (!this->dispatch(n % this->workers.size(), task)) {
+          log().error("No healthy workers");
+          return false;
+        }
+      }
+    }
+    else {
+      log().info("enqueue file: %s", path.c_str());
+
+      WorkerTask task{ dicker::UnitType::File, path.c_str(), 0, static_cast<size_t>(size) };
+      size_t i = this->selectWorker(static_cast<AffinityKey>(affinity::forPath(entry.path())));
+
+      if (!this->dispatch(i, task)) {
+        log().error("No healthy workers");
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  bool run(const Root& root) {
+    const std::string rootStr = toUtf8(root.path);
+
+    std::error_code iterEc;
+
+    auto it = fs::recursive_directory_iterator(root.path, fs::directory_options::skip_permission_denied, iterEc);
+
     const auto end = fs::recursive_directory_iterator();
 
-    for (; !ec && it != end; it.increment(ec)) {
+    for (; !iterEc && it != end; it.increment(iterEc)) {
       const fs::directory_entry& entry = *it;
-      const std::string rel = fs::relative(entry.path(), root.path).generic_string();
-      const std::string name = entry.path().filename().string();
 
-      if (entry.is_directory(ec)) {
+      const std::string rel = toGenericUtf8(entry.path().lexically_relative(root.path));
+      const std::string name = toUtf8(entry.path().filename());
+
+      std::error_code ec;
+
+      const bool isDir = entry.is_directory(ec);
+      if (ec) {
+        log().error("stat failed, skipping: %s (%s)", toUtf8(entry.path()).c_str(), ec.message().c_str());
+        continue;
+      }
+
+      if (isDir) {
         if (!keep(root.rules, rel, name, true)) {
           it.disable_recursion_pending();
         }
         continue;
       }
 
-      if (!entry.is_regular_file(ec)) {
+      const bool isFile = entry.is_regular_file(ec);
+      if (ec || !isFile) {
         continue;
       }
+
       if (!keep(root.rules, rel, name, false)) {
         continue;
       }
 
-      const uint64_t size = entry.file_size(ec);
-      if (ec) {
-        continue;
-      }
-      const std::string path = entry.path().string();
-
-      if (size >= this->cfg.bigFileThreshold) {
-        const uint64_t chunkSize = this->cfg.chunkSize;
-        size_t n = 0;
-
-        for (uint64_t offset = 0; offset < size; offset += chunkSize, ++n) {
-          const uint64_t len = std::min<uint64_t>(chunkSize, size - offset);
-
-          log().info("enqueue chunk: %s", path.c_str());
-
-          WorkerTask task{ dicker::UnitType::Chunk, path.c_str(),
-                           static_cast<size_t>(offset), static_cast<size_t>(len) };
-
-          if (!this->dispatch(n % this->workers.size(), task)) {
-            log().error("No healthy workers");
-            return false;
-          }
-        }
-      }
-      else {
-        log().info("enqueue file: %s", path.c_str());
-
-        WorkerTask task{ dicker::UnitType::File, path.c_str(), 0, static_cast<size_t>(size) };
-        size_t i = this->selectWorker(static_cast<AffinityKey>(affinity::forPath(entry.path())));
-
-        if (!this->dispatch(i, task)) {
-          log().error("No healthy workers");
-          return false;
-        }
+      if (!this->enqueue(entry)) {
+        return false;
       }
     }
 
-    log().info("root done: %s", root.path.string().c_str());
+    if (iterEc) {
+      log().error("walk aborted: %s (%s)", rootStr.c_str(), iterEc.message().c_str());
+      return false;
+    }
+
+    log().info("root done: %s", rootStr.c_str());
     return true;
   }
 };

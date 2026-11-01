@@ -79,20 +79,18 @@ inline Proxy parseProxy(const std::string& url) {
   return p;
 }
 
-// Built from a URL: Conn{"dicker://[sessionId:]secret@host:port?query"} with an
-// optional second SOCKS5 proxy URL. Scheme and userinfo are optional. The query
-// is &-separated named params: "integrity" (or integrity=1) sets the integrity
-// bit; "compressionAlgo=zstd|lz4|none" (alias "algo") picks the codec. An
-// explicit sessionId is raw bytes (<=16, zero-padded); otherwise it stays random.
-struct Conn {
+struct BaseConn {
   std::string host;
   std::string port;
+  bool tls = false;
+  Proxy proxy = {};
+};
+
+struct Conn : BaseConn {
   std::array<uint8_t, 16> sessionId = randomSessionId();
   std::string key;
   uint8_t flags = 0;
   dicker::CompressionAlgo compressionAlgo = dicker::CompressionAlgo::Zstd;
-  Proxy proxy = {};
-  bool tls = false;
 
   Conn() = default;
 
@@ -101,6 +99,10 @@ struct Conn {
     if (!proxyUrl.empty()) {
       this->proxy = parseProxy(proxyUrl);
     }
+  }
+
+  BaseConn base() {
+    return { this->host, this->port, this->tls, this->proxy };
   }
 
   void parse(const std::string& url) {

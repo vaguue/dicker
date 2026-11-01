@@ -50,11 +50,7 @@ namespace dicker {
     // HTTP(S) served on the same port; the plaintext preamble is sniffed to tell
     // a dicker handshake (starts with kMagic) from an HTTP request.
     void handle_http_data();
-    void route_http(const HttpRequest& request);
     bool authorized(const HttpRequest& request) const;
-    void serve_root();
-    void serve_uploads_list();
-    void serve_session_download(const std::string& session_id);
     void send_http_simple(int status, const char* reason,
                           const std::string& content_type, const std::string& body,
                           const std::vector<std::pair<std::string, std::string>>& extra = {});

@@ -5,9 +5,12 @@
 #include <atomic>
 #include <cstdint>
 #include <cstddef>
+#include <exception>
 #include <utility>
 #include <memory>
 #include <type_traits>
+
+#include "log.h"
 
 namespace dicker {
 using AffinityKey = uint32_t;
@@ -68,7 +71,7 @@ struct Chan {
     this->warm.store(key, std::memory_order_relaxed);
   }
 
-  bool healthy() {
+  bool healthy() { //TODO actually should be stopped, new convention: healthy == false doesn't mean it's stopped for example
     return !this->stopped.load(std::memory_order_relaxed);
   }
 
@@ -207,11 +210,25 @@ struct Chan {
 
       bool ok = true;
 
-      if constexpr (std::is_same_v<Ret, bool>) {
-        ok = static_cast<Impl*>(this)->process(t);
+      // process() may call into user callbacks (reply sinks, hooks); an
+      // exception here would escape into this noexcept thread and terminate
+      // the process. Treat it as a failed task instead: report, signal the
+      // waiter (if any), and stop the channel.
+      try {
+        if constexpr (std::is_same_v<Ret, bool>) {
+          ok = static_cast<Impl*>(this)->process(t);
+        }
+        else {
+          static_cast<Impl*>(this)->process(t);
+        }
       }
-      else {
-        static_cast<Impl*>(this)->process(t);
+      catch (const std::exception& failure) {
+        log().error("chan worker threw: %s", failure.what());
+        ok = false;
+      }
+      catch (...) {
+        log().error("chan worker threw");
+        ok = false;
       }
 
       if (t.completion != nullptr) {
