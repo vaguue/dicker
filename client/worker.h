@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <memory>
 #include <string>
 #include <vector>
@@ -20,11 +21,16 @@
 #include "task.h"
 #include "compressor.h"
 #include "storageReader.h"
-#include "chan.h"
+#include "events.h"
 #include "log.h"
+
+#include "muypoco/chan.h"
 
 
 namespace dicker {
+using AffinityKey = uint32_t;
+constexpr AffinityKey NONE = 0;
+
 const size_t OUT_BUF_SIZE = READ_BLOCK + READ_BLOCK / 16 + 1024;
 
 inline std::string hex(const std::uint8_t* d, std::size_t n) {
@@ -50,23 +56,19 @@ inline const char* handshakeStatusName(std::uint8_t s) {
   }
 }
 
-struct Worker : Chan<Worker, WorkerTask, 128> {
+struct Worker {
   uint8_t outBuf[OUT_BUF_SIZE];
 
   bool integrity = false;
 
-  std::shared_ptr<StorageReader> storage;
+  std::atomic<AffinityKey> warm{NONE};
+  std::shared_ptr<StorageReaderChan> storage;
   std::unique_ptr<StreamCompressor> compressor;
   Conn conn;
-  NetworkClient network;
+  NetworkChan network;
 
-  Worker(std::unique_ptr<StreamCompressor> compressor, std::shared_ptr<StorageReader> storage, Conn conn)
+  Worker(std::unique_ptr<StreamCompressor> compressor, std::shared_ptr<StorageReaderChan> storage, Conn conn)
     : storage{std::move(storage)}, compressor{std::move(compressor)}, conn{std::move(conn)}, network{this->conn} {
-  }
-
-  ~Worker() {
-    this->shutdown();
-    this->network.shutdown();
   }
 
   bool init() noexcept {
@@ -96,7 +98,7 @@ struct Worker : Chan<Worker, WorkerTask, 128> {
 
     uint8_t reply[kHandshakeReplySize];
 
-    if (!this->network.recvExact(reply, sizeof(reply))) {
+    if (!this->network.worker.recvExact(reply, sizeof(reply))) {
       log().error("no handshake reply (timeout or server closed the connection)");
       return false;
     }
@@ -107,8 +109,7 @@ struct Worker : Chan<Worker, WorkerTask, 128> {
                hex(reply, sizeof(reply)).c_str(), status, handshakeStatusName(status));
 
     if (status != 0) {
-      log().error((std::string("handshake rejected by server: ") +
-                               handshakeStatusName(status)).c_str());
+      log().error("handshake rejected by server: %s", handshakeStatusName(status));
       return false;
     }
 
@@ -150,15 +151,27 @@ struct Worker : Chan<Worker, WorkerTask, 128> {
 
   void drainStorage() {
     Filled fb;
-    while (this->storage->next(fb)) {
+    while (this->storage->worker.next(fb)) {
       if (fb.eof) {
         return;
       }
-      this->storage->recycle(fb.idx);
+      this->storage->worker.recycle(fb.idx);
     }
   }
 
   bool process(const Task& t) noexcept {
+    const std::string_view path = t.pathname;
+
+    events.emit<"upload.started">(UploadStarted{path, t.type, t.offset, t.length, t.fileSize});
+
+    uint64_t compressedBytes = 0;
+    const bool ok = this->upload(t, compressedBytes);
+
+    events.emit<"upload.finished">(UploadFinished{path, t.type, t.offset, t.length, t.fileSize, compressedBytes, ok});
+    return ok;
+  }
+
+  bool upload(const Task& t, uint64_t& compressedBytes) noexcept {
     std::vector<uint8_t> header;
 
     header.push_back(static_cast<uint8_t>(t.type));
@@ -180,15 +193,15 @@ struct Worker : Chan<Worker, WorkerTask, 128> {
       XXH64_reset(&checksum, 0);
     }
 
-    this->storage->submit(t.type, t.pathname, t.offset, t.length);
+    submit(*this->storage, t.type, t.pathname, t.offset, t.length);
 
     Filled fb;
-    while (this->storage->next(fb)) {
+    while (this->storage->worker.next(fb)) {
       if (fb.eof) {
         break;
       }
 
-      uint8_t* data = this->storage->data(fb.idx);
+      uint8_t* data = this->storage->worker.data(fb.idx);
 
       if (this->integrity) {
         XXH64_update(&checksum, data, fb.len);
@@ -197,13 +210,14 @@ struct Worker : Chan<Worker, WorkerTask, 128> {
       size_t produced = this->compressor->update(data, fb.len, this->outBuf, OUT_BUF_SIZE);
       if (produced > 0) {
         if (!this->sendBlock(this->outBuf, produced)) {
-          this->storage->recycle(fb.idx);
+          this->storage->worker.recycle(fb.idx);
           this->drainStorage();
           return false;
         }
+        compressedBytes += produced;
       }
 
-      this->storage->recycle(fb.idx);
+      this->storage->worker.recycle(fb.idx);
     }
 
     size_t flushed = this->compressor->flush(this->outBuf, OUT_BUF_SIZE);
@@ -211,6 +225,7 @@ struct Worker : Chan<Worker, WorkerTask, 128> {
       if (!this->sendBlock(this->outBuf, flushed)) {
         return false;
       }
+      compressedBytes += flushed;
     }
 
     uint8_t endOfUnit = static_cast<uint8_t>(BlockType::EndOfUnit);
@@ -234,4 +249,6 @@ struct Worker : Chan<Worker, WorkerTask, 128> {
     this->network.enqueue({&eof, 1});
   }
 };
+
+using WorkerChan = muypoco::Chan<Worker, WorkerTask, 128>;
 }  // namespace dicker

@@ -131,8 +131,8 @@ struct Scheduler { //TODO add a stop method
   Config cfg;
   std::shared_ptr<Storage> storage;
   std::vector<Root> roots;
-  std::vector<std::shared_ptr<StorageReader>> readers;
-  std::vector<std::unique_ptr<Worker>> workers;
+  std::vector<std::shared_ptr<StorageReaderChan>> readers;
+  std::vector<std::unique_ptr<WorkerChan>> workers;
   std::vector<WorkerState> workersStates;
 
   const uint32_t busyThreshold = 32;
@@ -145,18 +145,26 @@ struct Scheduler { //TODO add a stop method
     this->readers.reserve(this->cfg.workers);
 
     for (size_t i = 0; i < this->cfg.workers; ++i) {
-      this->readers.emplace_back(std::make_shared<StorageReader>(this->storage.get()));
+      this->readers.emplace_back(std::make_shared<StorageReaderChan>(this->storage.get()));
     }
 
     this->workers.reserve(cfg.workers);
     this->workersStates.resize(cfg.workers);
 
     for (size_t i = 0; i < cfg.workers; ++i) {
-      this->workers.emplace_back(std::make_unique<Worker>(
+      this->workers.emplace_back(std::make_unique<WorkerChan>(
         makeCompressor(cfg.conn.compressionAlgo),
         this->readers[i],
         cfg.conn)
       );
+    }
+  }
+
+  ~Scheduler() {
+    this->workers.clear();
+
+    for (auto& reader : this->readers) {
+      reader->worker.close();
     }
   }
 
@@ -183,7 +191,7 @@ struct Scheduler { //TODO add a stop method
     for (size_t i{}; i < this->workers.size(); ++i) {
       auto& worker = this->workers[i];
 
-      if (!worker->healthy()) {
+      if (worker->isStopped()) {
         continue;
       }
 
@@ -198,7 +206,7 @@ struct Scheduler { //TODO add a stop method
         continue;
       }
 
-      const AffinityKey resident = worker->warmKey();
+      const AffinityKey resident = worker->worker.warm.load(std::memory_order_relaxed);
 
       const uint32_t distance = affinity::distance(static_cast<affinity::AffinityKey>(incoming), static_cast<affinity::AffinityKey>(resident));
 
@@ -223,7 +231,7 @@ struct Scheduler { //TODO add a stop method
       if (this->workersStates[i] == WorkerState::PENDING) {
         if (!worker->awaitInit()) {
           this->workersStates[i] = WorkerState::FAILED;
-          log().info((std::string("Skipping worker (1) ") + std::to_string(i)).c_str());
+          log().info("Skipping worker (1) %zu", i);
           continue;
         }
         else {
@@ -231,12 +239,12 @@ struct Scheduler { //TODO add a stop method
         }
       }
 
-      if (workersStates[i] == WorkerState::FAILED || !worker->healthy()) {
-        log().info((std::string("Skipping worker (2) ") + std::to_string(i)).c_str());
+      if (workersStates[i] == WorkerState::FAILED || worker->isStopped()) {
+        log().info("Skipping worker (2) %zu", i);
         continue;
       }
       if (worker->enqueue(t)) {
-        log().info((std::string("Queueing worker ") + std::to_string(i)).c_str());
+        log().info("Queueing worker %zu", i);
         return true;
       }
     }
@@ -288,7 +296,7 @@ struct Scheduler { //TODO add a stop method
 
         log().info("enqueue chunk: %s", path.c_str());
 
-        WorkerTask task{ dicker::UnitType::Chunk, path.c_str(), static_cast<size_t>(offset), static_cast<size_t>(len) };
+        WorkerTask task{ dicker::UnitType::Chunk, path.c_str(), static_cast<size_t>(offset), static_cast<size_t>(len), size };
 
         if (!this->dispatch(n % this->workers.size(), task)) {
           log().error("No healthy workers");
@@ -299,7 +307,7 @@ struct Scheduler { //TODO add a stop method
     else {
       log().info("enqueue file: %s", path.c_str());
 
-      WorkerTask task{ dicker::UnitType::File, path.c_str(), 0, static_cast<size_t>(size) };
+      WorkerTask task{ dicker::UnitType::File, path.c_str(), 0, static_cast<size_t>(size), size };
       size_t i = this->selectWorker(static_cast<AffinityKey>(affinity::forPath(entry.path())));
 
       if (!this->dispatch(i, task)) {

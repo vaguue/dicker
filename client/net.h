@@ -23,7 +23,7 @@
 #endif
 
 #include "conn.h"
-#include "chan.h"
+#include "muypoco/chan.h"
 #include "task.h"
 #include "log.h"
 #include "net_io.h"
@@ -180,7 +180,7 @@ inline socket_t tcpConnect(const char* host, const char* port, const Proxy& px =
 
 }
 
-struct NetworkClient : Chan<NetworkClient, NetworkTask, 1024> {
+struct NetworkClient {
   net::socket_t fd = net::INVALID;
   bool logged_first_send = false;
   BaseConn conn;
@@ -252,4 +252,6 @@ struct NetworkClient : Chan<NetworkClient, NetworkTask, 1024> {
     return net::tcpRecv(this->fd, buf, len, 0);
   }
 };
+
+using NetworkChan = muypoco::Chan<NetworkClient, NetworkTask, 1024>;
 }  // namespace dicker

@@ -1,493 +1,678 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
-const WOLFSSL_VER = "5.7.4";
+const minimum_zig_version: std.SemanticVersion = .{ .major = 0, .minor = 16, .patch = 0 };
+
+comptime {
+  if (builtin.zig_version.order(minimum_zig_version) == .lt) {
+    @compileError("dicker needs zig 0.16.0 or newer, found " ++ builtin.zig_version_string);
+  }
+}
 
 const client_targets = [_][]const u8{
-    "x86_64-macos",       "aarch64-macos",       "x86_64-linux-musl", "aarch64-linux-musl",
-    "x86_64-windows-gnu", "aarch64-windows-gnu",
-};
-const server_targets = [_][]const u8{
-    "x86_64-macos", "aarch64-macos", "x86_64-linux-musl", "aarch64-linux-musl",
+  "x86_64-macos",
+  "aarch64-macos",
+  "x86_64-linux-musl",
+  "aarch64-linux-musl",
+  "x86_64-windows-gnu",
+  "aarch64-windows-gnu",
 };
 
-const ClientBin = struct { base: []const u8, name: []const u8, in_default: bool = true, win_only: bool = false };
-const client_custom = [_]ClientBin{
-    .{ .base = "cli", .name = "dicker" },
-    .{ .base = "deploy", .name = "deploy", .in_default = false },
+const server_targets = [_][]const u8{
+  "x86_64-macos",
+  "aarch64-macos",
+  "x86_64-linux-musl",
+  "aarch64-linux-musl",
+};
+
+const client_cxx_flags = [_][]const u8{ "-std=c++20", "-Wall", "-ffunction-sections", "-fdata-sections" };
+const server_cxx_flags = [_][]const u8{ "-std=c++17", "-Wall", "-ffunction-sections", "-fdata-sections" };
+const vendor_c_flags = [_][]const u8{ "-w", "-ffunction-sections", "-fdata-sections" };
+
+const Deps = struct {
+  muypoco: *std.Build.Dependency,
+  zstd: *std.Build.Dependency,
+  lz4: *std.Build.Dependency,
+  wolfssl: *std.Build.Dependency,
+};
+
+const WolfConfig = enum {
+  x86_64,
+  aarch64_apple,
+  aarch64_linux,
+  portable,
+};
+
+const wolfssl_common_defines = [_][]const u8{
+  "WOLFSSL_HAVE_ATOMIC_H",
+  "HAVE_C___ATOMIC=1",
+  "HAVE_THREAD_LS",
+  "NO_DO178",
+  "WOLFSSL_ASN_TEMPLATE",
+  "ERROR_QUEUE_PER_THREAD",
+  "TFM_TIMING_RESISTANT",
+  "ECC_TIMING_RESISTANT",
+  "WC_RSA_BLINDING",
+  "WOLFSSL_USE_ALIGN",
+  "WOLFSSL_SHA224",
+  "WOLFSSL_SHA512",
+  "WOLFSSL_SHA384",
+  "HAVE_HKDF",
+  "NO_DSA",
+  "HAVE_ECC",
+  "TFM_ECC256",
+  "ECC_SHAMIR",
+  "ECC_MIN_KEY_SZ=224",
+  "HAVE_CURVE25519",
+  "NO_OLD_TLS",
+  "WC_RSA_PSS",
+  "WOLFSSL_PSS_LONG_SALT",
+  "WOLFSSL_SHA3",
+  "WOLFSSL_NO_SHAKE128",
+  "WOLFSSL_NO_SHAKE256",
+  "HAVE_POLY1305",
+  "HAVE_CHACHA",
+  "HAVE_HASHDRBG",
+  "HAVE_TLS_EXTENSIONS",
+  "HAVE_SNI",
+  "HAVE_ALPN",
+  "HAVE_SUPPORTED_CURVES",
+  "HAVE_FFDHE_2048",
+  "WOLFSSL_TLS13",
+  "HAVE_EXTENDED_MASTER",
+  "NO_RC4",
+  "HAVE_ENCRYPT_THEN_MAC",
+  "NO_PSK",
+  "NO_MD4",
+  "WOLFSSL_SP_MATH_ALL",
+  "WC_NO_ASYNC_THREADING",
+  "HAVE_DH_DEFAULT_PARAMS",
+  "NO_DES3",
+  "NO_DES3_TLS_SUITES",
+  "GCM_TABLE_4BIT",
+  "HAVE_AESGCM",
+  "HAVE_SERVER_RENEGOTIATION_INFO",
+  "HAVE___UINT128_T=1",
+  "WOLFSSL_TEST_STATIC_BUILD",
+  "HAVE_WC_INTROSPECTION",
+};
+
+const wolfssl_x86_64_defines = [_][]const u8{
+  "WOLFSSL_X86_64_BUILD",
+  "WOLFSSL_AESNI",
+  "USE_INTEL_SPEEDUP",
+  "WOLFSSL_ASN_PRINT",
+  "WOLFSSL_BASE64_ENCODE",
+  "WOLFSSL_SP_X86_64",
+};
+
+const wolfssl_aarch64_defines = [_][]const u8{
+  "WOLFSSL_ARMASM",
+  "WOLFSSL_ARMASM_INLINE",
+  "WOLFSSL_NO_HASH_RAW",
+  "WOLFSSL_ASN_PRINT",
+  "WOLFSSL_SP_ARM64",
+  "WOLFSSL_AARCH64_BUILD",
+};
+
+const wolfssl_aarch64_apple_defines = [_][]const u8{
+  "WOLFSSL_ARMASM_CRYPTO_SHA512",
+  "WOLFSSL_ARMASM_CRYPTO_SHA3",
+};
+
+const wolfssl_aarch64_linux_defines = [_][]const u8{
+  "WOLFSSL_AARCH64_NO_SQRMLSH",
+};
+
+const wolfssl_portable_defines = [_][]const u8{
+  "TFM_NO_ASM",
+  "WOLFSSL_NO_ASM",
+  "NO_CHACHA_ASM",
+};
+
+const wolfssl_tls_sources = [_][]const u8{
+  "src/internal.c",
+  "src/keys.c",
+  "src/ssl.c",
+  "src/tls.c",
+  "src/tls13.c",
+  "src/wolfio.c",
+};
+
+const wolfcrypt_sources = [_][]const u8{
+  "wolfcrypt/src/aes.c",
+  "wolfcrypt/src/asn.c",
+  "wolfcrypt/src/chacha.c",
+  "wolfcrypt/src/chacha20_poly1305.c",
+  "wolfcrypt/src/coding.c",
+  "wolfcrypt/src/cpuid.c",
+  "wolfcrypt/src/curve25519.c",
+  "wolfcrypt/src/dh.c",
+  "wolfcrypt/src/ecc.c",
+  "wolfcrypt/src/error.c",
+  "wolfcrypt/src/hash.c",
+  "wolfcrypt/src/hmac.c",
+  "wolfcrypt/src/kdf.c",
+  "wolfcrypt/src/logging.c",
+  "wolfcrypt/src/md5.c",
+  "wolfcrypt/src/memory.c",
+  "wolfcrypt/src/pkcs12.c",
+  "wolfcrypt/src/poly1305.c",
+  "wolfcrypt/src/pwdbased.c",
+  "wolfcrypt/src/random.c",
+  "wolfcrypt/src/rsa.c",
+  "wolfcrypt/src/sha.c",
+  "wolfcrypt/src/sha256.c",
+  "wolfcrypt/src/sha3.c",
+  "wolfcrypt/src/signature.c",
+  "wolfcrypt/src/sp_int.c",
+  "wolfcrypt/src/wc_encrypt.c",
+  "wolfcrypt/src/wc_lms.c",
+  "wolfcrypt/src/wc_lms_impl.c",
+  "wolfcrypt/src/wc_port.c",
+  "wolfcrypt/src/wc_xmss.c",
+  "wolfcrypt/src/wc_xmss_impl.c",
+  "wolfcrypt/src/wolfmath.c",
+};
+
+const wolfcrypt_x86_64_sources = [_][]const u8{
+  "wolfcrypt/src/sha512.c",
+};
+
+const wolfcrypt_x86_64_assembly = [_][]const u8{
+  "wolfcrypt/src/aes_asm.S",
+  "wolfcrypt/src/aes_gcm_asm.S",
+  "wolfcrypt/src/aes_xts_asm.S",
+  "wolfcrypt/src/chacha_asm.S",
+  "wolfcrypt/src/fe_x25519_asm.S",
+  "wolfcrypt/src/poly1305_asm.S",
+  "wolfcrypt/src/sha256_asm.S",
+  "wolfcrypt/src/sha3_asm.S",
+  "wolfcrypt/src/sha512_asm.S",
+};
+
+const wolfcrypt_aarch64_sources = [_][]const u8{
+  "wolfcrypt/src/port/arm/armv8-aes.c",
+  "wolfcrypt/src/port/arm/armv8-32-aes-asm_c.c",
+  "wolfcrypt/src/port/arm/armv8-sha256.c",
+  "wolfcrypt/src/port/arm/armv8-32-sha256-asm_c.c",
+  "wolfcrypt/src/port/arm/armv8-sha512.c",
+  "wolfcrypt/src/port/arm/armv8-sha512-asm_c.c",
+  "wolfcrypt/src/port/arm/armv8-32-sha512-asm_c.c",
+  "wolfcrypt/src/port/arm/armv8-sha3-asm_c.c",
+  "wolfcrypt/src/port/arm/armv8-32-sha3-asm_c.c",
+  "wolfcrypt/src/port/arm/armv8-poly1305.c",
+  "wolfcrypt/src/port/arm/armv8-32-poly1305-asm_c.c",
+  "wolfcrypt/src/port/arm/armv8-chacha.c",
+  "wolfcrypt/src/port/arm/armv8-32-chacha-asm_c.c",
+  "wolfcrypt/src/port/arm/armv8-curve25519_c.c",
+};
+
+const wolfcrypt_portable_sources = [_][]const u8{
+  "wolfcrypt/src/sha512.c",
+  "wolfcrypt/src/fe_operations.c",
+};
+
+const lz4_sources = [_][]const u8{
+  "lib/lz4.c",
+  "lib/lz4hc.c",
+  "lib/lz4frame.c",
+  "lib/xxhash.c",
+};
+
+const libuv_common_sources = [_][]const u8{
+  "fs-poll",
+  "idna",
+  "inet",
+  "random",
+  "strscpy",
+  "strtok",
+  "thread-common",
+  "threadpool",
+  "timer",
+  "uv-common",
+  "uv-data-getter-setters",
+  "version",
+};
+
+const libuv_unix_sources = [_][]const u8{
+  "async",
+  "core",
+  "dl",
+  "fs",
+  "getaddrinfo",
+  "getnameinfo",
+  "loop-watcher",
+  "loop",
+  "pipe",
+  "poll",
+  "process",
+  "random-devurandom",
+  "signal",
+  "stream",
+  "tcp",
+  "thread",
+  "tty",
+  "udp",
+};
+
+const libuv_linux_sources = [_][]const u8{
+  "proctitle",
+  "linux",
+  "procfs-exepath",
+  "random-getrandom",
+  "random-sysctl-linux",
+};
+
+const libuv_darwin_sources = [_][]const u8{
+  "proctitle",
+  "bsd-ifaddrs",
+  "kqueue",
+  "random-getentropy",
+  "darwin-proctitle",
+  "darwin",
+  "fsevents",
+};
+
+const server_sources = [_][]const u8{
+  "server/main.cxx",
+  "server/server.cxx",
+  "server/connection.cxx",
+  "server/tls_layer.cxx",
+  "server/byte_channel.cxx",
+  "server/file_sink.cxx",
+  "server/handshake.cxx",
+  "server/decompressor.cxx",
+  "server/lz4_decompressor.cxx",
+  "server/zstd_decompressor.cxx",
+  "server/db.cxx",
+  "server/http.cxx",
+  "server/archive.cxx",
+  "server/router.cxx",
+  "server/http_context.cxx",
 };
 
 pub fn build(b: *std.Build) void {
-    const target = b.standardTargetOptions(.{});
-    const debug = b.option(bool, "debug", "dev build: keep symbols, no optimization/strip") orelse false;
-    const optimize: std.builtin.OptimizeMode = if (debug) .Debug else .ReleaseFast;
+  const target = b.standardTargetOptions(.{});
+  const debug = b.option(bool, "debug", "dev build: keep symbols, no optimization/strip") orelse false;
+  const default_optimize: std.builtin.OptimizeMode = if (debug) .Debug else .ReleaseFast;
+  const optimize = b.option(std.builtin.OptimizeMode, "optimize", "Optimization mode (default ReleaseFast, Debug with -Ddebug)") orelse default_optimize;
 
-    const client_step = b.step("client", "Build all client binaries (glob of client/*.cxx)");
-    const server_step = b.step("server", "Build the server binaries (dicker-server, dicker-dbtool)");
-    const release_step = b.step("release", "Cross-build the full matrix into client/out and server/out");
+  const deps: Deps = .{
+    .muypoco = b.dependency("muypoco", .{}),
+    .zstd = b.dependency("zstd", .{}),
+    .lz4 = b.dependency("lz4", .{}),
+    .wolfssl = b.dependency("wolfssl", .{}),
+  };
 
-    addClientArtifacts(b, target, optimize, client_step, b.getInstallStep());
-    addServerArtifacts(b, target, optimize, server_step);
+  const library = dickerLibrary(b, deps, target, optimize);
+  b.installArtifact(library);
+
+  if (b.pkg_hash.len != 0) {
+    return;
+  }
+
+  const client_step = b.step("client", "Build the client binaries (client/*.cxx)");
+  const server_step = b.step("server", "Build the server binaries (dicker-server, dicker-dbtool)");
+  const release_step = b.step("release", "Cross-build the full matrix into client/out and server/out");
+
+  addClientArtifacts(b, library, target, optimize, client_step);
+  b.getInstallStep().dependOn(client_step);
+
+  if (addServerArtifacts(b, library, target, optimize, server_step)) {
     b.getInstallStep().dependOn(server_step);
+  }
 
-    for (client_targets) |triple| {
-        const rt = resolveTriple(b, triple);
-        addClientArtifacts(b, rt, .ReleaseFast, release_step, null);
+  for (client_targets) |triple| {
+    const resolved = resolveTriple(b, triple);
+    addClientArtifacts(b, dickerLibrary(b, deps, resolved, .ReleaseFast), resolved, .ReleaseFast, release_step);
+  }
+  for (server_targets) |triple| {
+    const resolved = resolveTriple(b, triple);
+    _ = addServerArtifacts(b, dickerLibrary(b, deps, resolved, .ReleaseFast), resolved, .ReleaseFast, release_step);
+  }
+}
+
+fn dickerLibrary(b: *std.Build, deps: Deps, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step.Compile {
+  const module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true });
+
+  addZstd(module, deps.zstd);
+  addLz4(module, deps.lz4);
+
+  const wolfssl_options = addWolfssl(b, module, deps.wolfssl, target);
+  const library = b.addLibrary(.{ .name = "dicker", .root_module = module, .linkage = .static });
+
+  library.installHeadersDirectory(b.path("client"), "dicker", .{ .include_extensions = &.{".h"} });
+  library.installHeadersDirectory(b.path("shared"), "dicker", .{ .include_extensions = &.{".h"} });
+  library.installHeadersDirectory(deps.muypoco.namedLazyPath("include"), "", .{});
+  library.installHeader(deps.zstd.path("lib/zstd.h"), "zstd.h");
+  library.installHeader(deps.zstd.path("lib/zstd_errors.h"), "zstd_errors.h");
+  library.installHeader(deps.lz4.path("lib/lz4.h"), "lz4.h");
+  library.installHeader(deps.lz4.path("lib/lz4hc.h"), "lz4hc.h");
+  library.installHeader(deps.lz4.path("lib/lz4frame.h"), "lz4frame.h");
+  library.installHeadersDirectory(deps.wolfssl.path("wolfssl"), "wolfssl", .{ .include_extensions = &.{".h"} });
+  library.installHeader(wolfssl_options, "wolfssl/options.h");
+
+  return library;
+}
+
+fn addZstd(module: *std.Build.Module, zstd: *std.Build.Dependency) void {
+  module.addIncludePath(zstd.path("lib"));
+  module.addIncludePath(zstd.path("lib/common"));
+
+  for ([_][]const u8{ "lib/common", "lib/compress", "lib/decompress" }) |dir| {
+    module.addCSourceFiles(.{
+      .root = zstd.path(dir),
+      .files = listFiles(zstd.builder, dir, ".c"),
+      .flags = &(vendor_c_flags ++ [_][]const u8{"-DZSTD_DISABLE_ASM"}),
+      .language = .c,
+    });
+  }
+}
+
+fn addLz4(module: *std.Build.Module, lz4: *std.Build.Dependency) void {
+  module.addIncludePath(lz4.path("lib"));
+  module.addCSourceFiles(.{
+    .root = lz4.path(""),
+    .files = &lz4_sources,
+    .flags = &vendor_c_flags,
+    .language = .c,
+  });
+}
+
+fn wolfConfig(target: std.Build.ResolvedTarget) WolfConfig {
+  const result = target.result;
+
+  return switch (result.cpu.arch) {
+    .x86_64 => .x86_64,
+    .aarch64 => switch (result.os.tag) {
+      .macos, .ios => .aarch64_apple,
+      .linux => .aarch64_linux,
+      else => .portable,
+    },
+    else => .portable,
+  };
+}
+
+fn wolfDefines(b: *std.Build, config: WolfConfig) []const []const u8 {
+  var defines: std.ArrayList([]const u8) = .empty;
+
+  defines.appendSlice(b.allocator, &wolfssl_common_defines) catch @panic("OOM");
+
+  switch (config) {
+    .x86_64 => {
+      defines.appendSlice(b.allocator, &wolfssl_x86_64_defines) catch @panic("OOM");
+    },
+    .aarch64_apple => {
+      defines.appendSlice(b.allocator, &wolfssl_aarch64_defines) catch @panic("OOM");
+      defines.appendSlice(b.allocator, &wolfssl_aarch64_apple_defines) catch @panic("OOM");
+    },
+    .aarch64_linux => {
+      defines.appendSlice(b.allocator, &wolfssl_aarch64_defines) catch @panic("OOM");
+      defines.appendSlice(b.allocator, &wolfssl_aarch64_linux_defines) catch @panic("OOM");
+    },
+    .portable => {
+      defines.appendSlice(b.allocator, &wolfssl_portable_defines) catch @panic("OOM");
+    },
+  }
+
+  return defines.items;
+}
+
+fn wolfOptionsHeader(b: *std.Build, defines: []const []const u8) []const u8 {
+  var content: std.ArrayList(u8) = .empty;
+
+  content.appendSlice(b.allocator, "#ifndef WOLFSSL_OPTIONS_H\n#define WOLFSSL_OPTIONS_H\n\n") catch @panic("OOM");
+
+  for (defines) |define| {
+    const name_end = std.mem.indexOfScalar(u8, define, '=') orelse define.len;
+    const name = define[0..name_end];
+    const value = if (name_end < define.len) define[name_end + 1 ..] else "";
+
+    content.print(b.allocator, "#undef {s}\n#define {s} {s}\n\n", .{ name, name, value }) catch @panic("OOM");
+  }
+
+  content.appendSlice(b.allocator, "#endif\n") catch @panic("OOM");
+  return content.items;
+}
+
+fn addWolfssl(b: *std.Build, module: *std.Build.Module, wolfssl: *std.Build.Dependency, target: std.Build.ResolvedTarget) std.Build.LazyPath {
+  const config = wolfConfig(target);
+  const defines = wolfDefines(b, config);
+
+  var flags: std.ArrayList([]const u8) = .empty;
+  flags.appendSlice(b.allocator, &vendor_c_flags) catch @panic("OOM");
+
+  for (defines) |define| {
+    flags.append(b.allocator, b.fmt("-D{s}", .{define})) catch @panic("OOM");
+  }
+
+  const generated = b.addWriteFiles();
+  const options = generated.add("wolfssl/options.h", wolfOptionsHeader(b, defines));
+
+  module.addIncludePath(generated.getDirectory());
+  module.addIncludePath(wolfssl.path(""));
+
+  var sources: std.ArrayList([]const u8) = .empty;
+  sources.appendSlice(b.allocator, &wolfssl_tls_sources) catch @panic("OOM");
+  sources.appendSlice(b.allocator, &wolfcrypt_sources) catch @panic("OOM");
+
+  switch (config) {
+    .x86_64 => {
+      sources.appendSlice(b.allocator, &wolfcrypt_x86_64_sources) catch @panic("OOM");
+      sources.appendSlice(b.allocator, &wolfcrypt_x86_64_assembly) catch @panic("OOM");
+    },
+    .aarch64_apple, .aarch64_linux => {
+      sources.appendSlice(b.allocator, &wolfcrypt_aarch64_sources) catch @panic("OOM");
+    },
+    .portable => {
+      sources.appendSlice(b.allocator, &wolfcrypt_portable_sources) catch @panic("OOM");
+    },
+  }
+
+  module.addCSourceFiles(.{
+    .root = wolfssl.path(""),
+    .files = sources.items,
+    .flags = flags.items,
+  });
+
+  return options;
+}
+
+fn addLibuv(b: *std.Build, module: *std.Build.Module, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) bool {
+  const libuv = b.lazyDependency("libuv", .{}) orelse return false;
+  const os = target.result.os.tag;
+  const uv = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true });
+
+  uv.addIncludePath(libuv.path("include"));
+  uv.addIncludePath(libuv.path("src"));
+
+  var files: std.ArrayList([]const u8) = .empty;
+  var flags: std.ArrayList([]const u8) = .empty;
+
+  for (libuv_common_sources) |name| {
+    files.append(b.allocator, b.fmt("src/{s}.c", .{name})) catch @panic("OOM");
+  }
+  for (libuv_unix_sources) |name| {
+    files.append(b.allocator, b.fmt("src/unix/{s}.c", .{name})) catch @panic("OOM");
+  }
+
+  flags.appendSlice(b.allocator, &vendor_c_flags) catch @panic("OOM");
+  flags.appendSlice(b.allocator, &.{ "-D_FILE_OFFSET_BITS=64", "-D_LARGEFILE_SOURCE" }) catch @panic("OOM");
+
+  if (os == .linux) {
+    flags.appendSlice(b.allocator, &.{ "-D_GNU_SOURCE", "-D_POSIX_C_SOURCE=200112" }) catch @panic("OOM");
+    for (libuv_linux_sources) |name| {
+      files.append(b.allocator, b.fmt("src/unix/{s}.c", .{name})) catch @panic("OOM");
     }
-    for (server_targets) |triple| {
-        const rt = resolveTriple(b, triple);
-        addServerArtifacts(b, rt, .ReleaseFast, release_step);
+  }
+  else {
+    flags.appendSlice(b.allocator, &.{ "-D_DARWIN_UNLIMITED_SELECT=1", "-D_DARWIN_USE_64_BIT_INODE=1" }) catch @panic("OOM");
+    for (libuv_darwin_sources) |name| {
+      files.append(b.allocator, b.fmt("src/unix/{s}.c", .{name})) catch @panic("OOM");
     }
+  }
+
+  uv.addCSourceFiles(.{ .root = libuv.path(""), .files = files.items, .flags = flags.items, .language = .c });
+
+  module.addIncludePath(libuv.path("include"));
+  module.linkLibrary(b.addLibrary(.{ .name = "uv", .root_module = uv, .linkage = .static }));
+  return true;
 }
 
 fn addClientArtifacts(
-    b: *std.Build,
-    target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
-    all_step: *std.Build.Step,
-    default_step: ?*std.Build.Step,
+  b: *std.Build,
+  library: *std.Build.Step.Compile,
+  target: std.Build.ResolvedTarget,
+  optimize: std.builtin.OptimizeMode,
+  step: *std.Build.Step,
 ) void {
-    const os = target.result.os.tag;
+  for (listFiles(b, "client", ".cxx")) |file| {
+    const stem = std.fs.path.stem(file);
+    const name = if (std.mem.eql(u8, stem, "cli")) "dicker" else stem;
+    const executable = clientExecutable(b, library, target, optimize, name, b.fmt("client/{s}", .{file}));
 
-    for (glob(b, "client", ".cxx")) |src| {
-        const base = std.fs.path.stem(src);
-        var spec = ClientBin{ .base = base, .name = base };
-        for (client_custom) |c| {
-            if (std.mem.eql(u8, c.base, base)) spec = c;
-        }
-        if (spec.win_only and os != .windows) continue;
-
-        const exe = buildClientExe(b, target, optimize, spec.name, src);
-        const ai = installStep(b, exe, target, "../client/out");
-        all_step.dependOn(ai);
-        if (default_step) |ds| {
-            if (spec.in_default) ds.dependOn(ai);
-        }
-    }
+    step.dependOn(installStep(b, executable, target, "../client/out"));
+  }
 }
 
-fn buildClientExe(
-    b: *std.Build,
-    target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
-    name: []const u8,
-    src: []const u8,
+fn clientExecutable(
+  b: *std.Build,
+  library: *std.Build.Step.Compile,
+  target: std.Build.ResolvedTarget,
+  optimize: std.builtin.OptimizeMode,
+  name: []const u8,
+  source: []const u8,
 ) *std.Build.Step.Compile {
-    const mod = b.createModule(.{ .target = target, .optimize = optimize });
-    mod.link_libcpp = true; // pulls in libc too
-    mod.strip = optimize != .Debug;
+  const module = b.createModule(.{ .target = target, .optimize = optimize, .link_libcpp = true });
 
-    mod.addCSourceFiles(.{
-        .files = &.{src},
-        .flags = &.{ "-std=c++20", "-O2", "-Wall", "-ffunction-sections", "-fdata-sections" },
-        .language = .cpp,
-    });
+  module.strip = optimize != .Debug;
+  module.addCSourceFiles(.{ .files = &.{source}, .flags = &client_cxx_flags, .language = .cpp });
+  module.linkLibrary(library);
+  linkClientSystemLibraries(b, module, target);
 
-    const llhttp_gen = generateLlhttp(b);
-    mod.addIncludePath(b.path("cxx_modules/llhttp/build"));
-    mod.addIncludePath(b.path("cxx_modules/llhttp/src/native"));
-    mod.addCSourceFiles(.{
-        .files = &.{
-            "cxx_modules/llhttp/build/c/llhttp.c",
-            "cxx_modules/llhttp/src/native/api.c",
-            "cxx_modules/llhttp/src/native/http.c",
-        },
-        .flags = &.{ "-O2", "-ffunction-sections", "-fdata-sections" },
-        .language = .c,
-    });
+  return b.addExecutable(.{ .name = name, .root_module = module });
+}
 
-    mod.addIncludePath(b.path("client"));
-    mod.addIncludePath(b.path("shared"));
-    mod.addIncludePath(b.path("cxx_modules"));
-    mod.addIncludePath(b.path("cxx_modules/lz4"));
-    mod.addIncludePath(b.path("cxx_modules/zstd/lib"));
-
-    linkVendor(b, mod, target, optimize);
-    const wolf = wolfssl(b, target);
-    mod.addIncludePath(.{ .cwd_relative = wolf.include_dir });
-
-    const exe = b.addExecutable(.{ .name = name, .root_module = mod });
-    if (llhttp_gen) |s| exe.step.dependOn(s);
-    if (wolf.step) |s| exe.step.dependOn(s);
-    mod.addLibraryPath(.{ .cwd_relative = wolf.lib_dir });
-    mod.linkSystemLibrary("wolfssl", .{});
-
-    switch (target.result.os.tag) {
-        .windows => {
-            for ([_][]const u8{ "ws2_32", "ole32", "oleaut32", "crypt32", "gdi32", "user32", "advapi32" }) |l|
-                mod.linkSystemLibrary(l, .{});
-            if (target.result.cpu.arch == .aarch64) {
-                const def = b.graph.zig_lib_directory.join(b.allocator, &.{ "libc", "mingw", "lib64", "vssapi.def" }) catch @panic("OOM");
-                const dt = b.addSystemCommand(&.{ b.graph.zig_exe, "dlltool", "-m", "arm64", "-d", def, "-l" });
-                const vlib = dt.addOutputFileArg("libvssapi.a");
-                mod.addLibraryPath(vlib.dirname());
-            }
-            mod.linkSystemLibrary("vssapi", .{});
-        },
-        .linux => for ([_][]const u8{ "dl", "rt" }) |l| mod.linkSystemLibrary(l, .{}),
-        else => {},
-    }
-
-    return exe;
+pub fn linkClientSystemLibraries(b: *std.Build, module: *std.Build.Module, target: std.Build.ResolvedTarget) void {
+  switch (target.result.os.tag) {
+    .windows => {
+      for ([_][]const u8{ "ws2_32", "ole32", "oleaut32", "crypt32", "gdi32", "user32", "advapi32" }) |name| {
+        module.linkSystemLibrary(name, .{});
+      }
+      if (target.result.cpu.arch == .aarch64) {
+        const definition = b.graph.zig_lib_directory.join(b.allocator, &.{ "libc", "mingw", "lib64", "vssapi.def" }) catch @panic("OOM");
+        const dlltool = b.addSystemCommand(&.{ b.graph.zig_exe, "dlltool", "-m", "arm64", "-d", definition, "-l" });
+        const import_library = dlltool.addOutputFileArg("libvssapi.a");
+        module.addLibraryPath(import_library.dirname());
+      }
+      module.linkSystemLibrary("vssapi", .{});
+    },
+    .linux => {
+      for ([_][]const u8{ "dl", "rt" }) |name| {
+        module.linkSystemLibrary(name, .{});
+      }
+    },
+    else => {},
+  }
 }
 
 fn addServerArtifacts(
-    b: *std.Build,
-    target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
-    step: *std.Build.Step,
-) void {
-    const os = target.result.os.tag;
-    const wolf = wolfssl(b, target);
+  b: *std.Build,
+  library: *std.Build.Step.Compile,
+  target: std.Build.ResolvedTarget,
+  optimize: std.builtin.OptimizeMode,
+  step: *std.Build.Step,
+) bool {
+  const server = b.createModule(.{ .target = target, .optimize = optimize, .link_libcpp = true });
+  server.strip = optimize != .Debug;
 
-    {
-        const mod = b.createModule(.{ .target = target, .optimize = optimize });
-        mod.link_libcpp = true;
-        mod.strip = optimize != .Debug;
-        const server_flags = &.{ "-std=c++17", "-O2", "-Wall", "-ffunction-sections", "-fdata-sections" };
-        mod.addCSourceFiles(.{
-            .files = &.{
-                "server/main.cxx",              "server/server.cxx",       "server/connection.cxx",
-                "server/tls_layer.cxx",         "server/byte_channel.cxx", "server/file_sink.cxx",
-                "server/handshake.cxx",         "server/decompressor.cxx", "server/lz4_decompressor.cxx",
-                "server/zstd_decompressor.cxx", "server/db.cxx",           "server/http.cxx",
-                "server/archive.cxx",           "server/router.cxx",       "server/http_context.cxx",
-            },
-            .flags = server_flags,
-            .language = .cpp,
-        });
-        // Controllers and middleware are drop-in: any .cxx under these dirs is
-        // compiled automatically (still register it in router.cxx).
-        mod.addCSourceFiles(.{ .files = glob(b, "server/controllers", ".cxx"), .flags = server_flags, .language = .cpp });
-        mod.addCSourceFiles(.{ .files = glob(b, "server/middleware", ".cxx"), .flags = server_flags, .language = .cpp });
-        mod.addIncludePath(b.path("server"));
-        mod.addIncludePath(b.path("cxx_modules"));
-        mod.addIncludePath(b.path("shared"));
-        mod.addIncludePath(b.path("cxx_modules/libuv/include"));
-        mod.addIncludePath(b.path("cxx_modules/lz4"));
-        mod.addIncludePath(b.path("cxx_modules/zstd/lib"));
-        mod.addIncludePath(.{ .cwd_relative = wolf.include_dir });
+  if (!addLibuv(b, server, target, optimize)) {
+    return false;
+  }
 
-        linkVendor(b, mod, target, optimize);
-        linkLibuv(b, mod, target, optimize);
+  server.addCSourceFiles(.{ .files = &server_sources, .flags = &server_cxx_flags, .language = .cpp });
+  server.addCSourceFiles(.{ .files = listPaths(b, "server/controllers", ".cxx"), .flags = &server_cxx_flags, .language = .cpp });
+  server.addCSourceFiles(.{ .files = listPaths(b, "server/middleware", ".cxx"), .flags = &server_cxx_flags, .language = .cpp });
+  addServerIncludes(b, server, library);
+  linkServerSystemLibraries(server, target);
+  step.dependOn(installStep(b, b.addExecutable(.{ .name = "dicker-server", .root_module = server }), target, "../server/out"));
 
-        const exe = b.addExecutable(.{ .name = "dicker-server", .root_module = mod });
-        if (wolf.step) |s| exe.step.dependOn(s);
-        mod.addLibraryPath(.{ .cwd_relative = wolf.lib_dir });
-        mod.linkSystemLibrary("wolfssl", .{});
-        mod.linkSystemLibrary("pthread", .{});
-        if (os == .linux) for ([_][]const u8{ "dl", "rt" }) |l| mod.linkSystemLibrary(l, .{});
+  const dbtool = b.createModule(.{ .target = target, .optimize = optimize, .link_libcpp = true });
+  dbtool.strip = optimize != .Debug;
+  dbtool.addCSourceFiles(.{ .files = &.{ "server/dbtool.cxx", "server/db.cxx" }, .flags = &server_cxx_flags, .language = .cpp });
+  addServerIncludes(b, dbtool, library);
+  linkServerSystemLibraries(dbtool, target);
+  step.dependOn(installStep(b, b.addExecutable(.{ .name = "dicker-dbtool", .root_module = dbtool }), target, "../server/out"));
 
-        step.dependOn(installStep(b, exe, target, "../server/out"));
-    }
-
-    {
-        const mod = b.createModule(.{ .target = target, .optimize = optimize });
-        mod.link_libcpp = true;
-        mod.strip = optimize != .Debug;
-        mod.addCSourceFiles(.{
-            .files = &.{ "server/dbtool.cxx", "server/db.cxx" },
-            .flags = &.{ "-std=c++17", "-O2", "-Wall", "-ffunction-sections", "-fdata-sections" },
-            .language = .cpp,
-        });
-        mod.addIncludePath(b.path("cxx_modules"));
-        mod.addIncludePath(b.path("shared"));
-        mod.addIncludePath(.{ .cwd_relative = wolf.include_dir });
-
-        const exe = b.addExecutable(.{ .name = "dicker-dbtool", .root_module = mod });
-        if (wolf.step) |s| exe.step.dependOn(s);
-        mod.addLibraryPath(.{ .cwd_relative = wolf.lib_dir });
-        mod.linkSystemLibrary("wolfssl", .{});
-        mod.linkSystemLibrary("pthread", .{});
-        if (os == .linux) for ([_][]const u8{ "dl", "rt" }) |l| mod.linkSystemLibrary(l, .{});
-
-        step.dependOn(installStep(b, exe, target, "../server/out"));
-    }
+  return true;
 }
 
-fn linkVendor(b: *std.Build, mod: *std.Build.Module, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) void {
-    const lib_mod = b.createModule(.{ .target = target, .optimize = optimize });
-    lib_mod.link_libc = true;
-
-    lib_mod.addIncludePath(b.path("cxx_modules/lz4"));
-    lib_mod.addCSourceFiles(.{
-        .files = &.{ "cxx_modules/lz4/lz4.c", "cxx_modules/lz4/lz4hc.c", "cxx_modules/lz4/lz4frame.c", "cxx_modules/lz4/xxhash.c" },
-        .flags = &.{ "-O2", "-ffunction-sections", "-fdata-sections" },
-        .language = .c,
-    });
-
-    lib_mod.addIncludePath(b.path("cxx_modules/zstd/lib"));
-    lib_mod.addIncludePath(b.path("cxx_modules/zstd/lib/common"));
-    for ([_][]const u8{ "cxx_modules/zstd/lib/common", "cxx_modules/zstd/lib/compress", "cxx_modules/zstd/lib/decompress" }) |dir| {
-        lib_mod.addCSourceFiles(.{
-            .files = glob(b, dir, ".c"),
-            .flags = &.{ "-O2", "-DZSTD_DISABLE_ASM", "-ffunction-sections", "-fdata-sections" },
-            .language = .c,
-        });
-    }
-
-    const lib = b.addLibrary(.{ .name = "vendor", .root_module = lib_mod, .linkage = .static });
-    mod.linkLibrary(lib);
+fn addServerIncludes(b: *std.Build, module: *std.Build.Module, library: *std.Build.Step.Compile) void {
+  module.addIncludePath(b.path("server"));
+  module.addIncludePath(b.path("shared"));
+  module.addIncludePath(b.path("cxx_modules"));
+  module.linkLibrary(library);
 }
 
-fn linkLibuv(b: *std.Build, mod: *std.Build.Module, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) void {
-    const os = target.result.os.tag;
-    const uv = b.createModule(.{ .target = target, .optimize = optimize });
-    uv.link_libc = true;
-    uv.addIncludePath(b.path("cxx_modules/libuv/include"));
-    uv.addIncludePath(b.path("cxx_modules/libuv/src"));
+fn linkServerSystemLibraries(module: *std.Build.Module, target: std.Build.ResolvedTarget) void {
+  module.linkSystemLibrary("pthread", .{});
 
-    var files = std.array_list.Managed([]const u8).init(b.allocator);
-    const base = [_][]const u8{ "fs-poll", "idna", "inet", "random", "strscpy", "strtok", "thread-common", "threadpool", "timer", "uv-common", "uv-data-getter-setters", "version" };
-    const unix = [_][]const u8{ "async", "core", "dl", "fs", "getaddrinfo", "getnameinfo", "loop-watcher", "loop", "pipe", "poll", "process", "random-devurandom", "signal", "stream", "tcp", "thread", "tty", "udp" };
-    for (base) |f| files.append(b.fmt("cxx_modules/libuv/src/{s}.c", .{f})) catch @panic("OOM");
-    for (unix) |f| files.append(b.fmt("cxx_modules/libuv/src/unix/{s}.c", .{f})) catch @panic("OOM");
-
-    var defs = std.array_list.Managed([]const u8).init(b.allocator);
-    defs.appendSlice(&.{ "-O2", "-ffunction-sections", "-fdata-sections", "-D_FILE_OFFSET_BITS=64", "-D_LARGEFILE_SOURCE" }) catch @panic("OOM");
-    if (os == .linux) {
-        defs.appendSlice(&.{ "-D_GNU_SOURCE", "-D_POSIX_C_SOURCE=200112" }) catch @panic("OOM");
-        for ([_][]const u8{ "proctitle", "linux", "procfs-exepath", "random-getrandom", "random-sysctl-linux" }) |f|
-            files.append(b.fmt("cxx_modules/libuv/src/unix/{s}.c", .{f})) catch @panic("OOM");
-    } else {
-        defs.appendSlice(&.{ "-D_DARWIN_UNLIMITED_SELECT=1", "-D_DARWIN_USE_64_BIT_INODE=1" }) catch @panic("OOM");
-        for ([_][]const u8{ "proctitle", "bsd-ifaddrs", "kqueue", "random-getentropy", "darwin-proctitle", "darwin", "fsevents" }) |f|
-            files.append(b.fmt("cxx_modules/libuv/src/unix/{s}.c", .{f})) catch @panic("OOM");
+  if (target.result.os.tag == .linux) {
+    for ([_][]const u8{ "dl", "rt" }) |name| {
+      module.linkSystemLibrary(name, .{});
     }
-
-    uv.addCSourceFiles(.{ .files = files.items, .flags = defs.items, .language = .c });
-    const lib = b.addLibrary(.{ .name = "uv", .root_module = uv, .linkage = .static });
-    mod.linkLibrary(lib);
+  }
 }
 
-const Wolf = struct { include_dir: []const u8, lib_dir: []const u8, step: ?*std.Build.Step };
+fn installStep(b: *std.Build, executable: *std.Build.Step.Compile, target: std.Build.ResolvedTarget, out_dir: []const u8) *std.Build.Step {
+  const extension: []const u8 = if (target.result.os.tag == .windows) ".exe" else "";
+  const sub_path = if (target.query.isNative())
+    b.fmt("{s}{s}", .{ executable.name, extension })
+  else
+    b.fmt("{s}-{s}{s}", .{ executable.name, tripleSuffix(b, target), extension });
 
-var wolf_cache: ?std.StringHashMap(Wolf) = null;
-
-fn wolfssl(b: *std.Build, target: std.Build.ResolvedTarget) Wolf {
-    const t = target.result;
-    const suffix = tripleSuffix(b, target);
-    if (wolf_cache == null) wolf_cache = std.StringHashMap(Wolf).init(b.allocator);
-    if (wolf_cache.?.get(suffix)) |w| return w;
-    const dest = b.pathFromRoot(b.fmt("cxx_modules/wolfssl/{s}", .{suffix}));
-    const lib_dir = b.fmt("{s}/lib", .{dest});
-    const include_dir = b.fmt("{s}/include", .{dest});
-
-    const asmconf: []const []const u8 = switch (t.cpu.arch) {
-        .x86_64 => &.{ "--enable-intelasm", "--enable-aesni" },
-        .aarch64 => if (t.os.tag == .windows) &.{"--disable-asm"} else &.{"--enable-armasm=inline"},
-        else => @panic("wolfssl: unsupported arch"),
-    };
-    const target_flag = if (target.query.isNative()) "" else b.fmt("-target {s}", .{suffix});
-    const host_triple: []const u8 = if (target.query.isNative()) "" else switch (t.os.tag) {
-        .macos => if (t.cpu.arch == .x86_64) "x86_64-apple-darwin" else "aarch64-apple-darwin",
-        .linux => if (t.cpu.arch == .x86_64) "x86_64-linux-musl" else "aarch64-linux-musl",
-        .windows => if (t.cpu.arch == .x86_64) "x86_64-w64-mingw32" else "aarch64-w64-mingw32",
-        else => @panic("wolfssl: unsupported os"),
-    };
-
-    var conf = std.array_list.Managed([]const u8).init(b.allocator);
-    if (host_triple.len != 0) conf.append(b.fmt("--host={s}", .{host_triple})) catch @panic("OOM");
-    conf.appendSlice(&.{
-        b.fmt("--prefix={s}", .{dest}), "--enable-static",      "--disable-shared",
-        "--enable-tls13",               "--enable-sni",         "--enable-alpn",
-        "--enable-aesgcm",              "--enable-chacha",      "--enable-poly1305",
-        "--enable-ecc",                 "--enable-curve25519",  "--enable-supportedcurves",
-        "--disable-examples",           "--disable-crypttests", "--disable-sys-ca-certs",
-    }) catch @panic("OOM");
-    conf.appendSlice(asmconf) catch @panic("OOM");
-    const stamp = b.fmt("1|{s}|{s}|{s}", .{ WOLFSSL_VER, suffix, std.mem.join(b.allocator, " ", conf.items) catch @panic("OOM") });
-
-    if (stampOk(b, suffix, stamp)) {
-        const w = Wolf{ .include_dir = include_dir, .lib_dir = lib_dir, .step = null };
-        wolf_cache.?.put(suffix, w) catch @panic("OOM");
-        return w;
-    }
-
-    const wolf_step = b.step(b.fmt("wolfssl-{s}", .{suffix}), "Build vendored wolfSSL");
-
-    const srcdir = b.pathFromRoot("cxx_modules/.cache/wolfssl-src");
-    const srcname = b.fmt("wolfssl-{s}-stable", .{WOLFSSL_VER});
-    const srcpath = b.fmt("{s}/{s}", .{ srcdir, srcname });
-    const builddir = b.fmt("{s}/build-{s}", .{ srcpath, suffix });
-    const tarpath = b.fmt("{s}/wolfssl-{s}.tar.gz", .{ srcdir, WOLFSSL_VER });
-
-    const shimdir = b.pathFromRoot(b.fmt("cxx_modules/.cache/wolfssl-shim-{s}", .{suffix}));
-    const shim = b.addSystemCommand(&.{ "sh", "-c", shimScript(b, shimdir, target_flag, host_triple) });
-
-    const mkdir_src = b.addSystemCommand(&.{ "mkdir", "-p", srcdir });
-    var last: *std.Build.Step = &mkdir_src.step;
-
-    if (!exists(b, srcpath)) {
-        const url = b.fmt("https://github.com/wolfSSL/wolfssl/archive/refs/tags/v{s}-stable.tar.gz", .{WOLFSSL_VER});
-        const dl = b.addSystemCommand(&.{ "curl", "-fsSL", "-o", tarpath, url });
-        dl.step.dependOn(last);
-        const untar = b.addSystemCommand(&.{ "tar", "xzf", tarpath, "-C", srcdir });
-        untar.step.dependOn(&dl.step);
-        last = &untar.step;
-    }
-
-    if (!exists(b, b.fmt("{s}/configure", .{srcpath}))) {
-        const autogen = b.addSystemCommand(&.{"./autogen.sh"});
-        autogen.setCwd(.{ .cwd_relative = srcpath });
-        autogen.step.dependOn(last);
-        last = &autogen.step;
-    }
-
-    const strip = b.addSystemCommand(&.{
-        "sh",                                                                                                                                 "-c",
-        b.fmt("find '{s}/wolfcrypt/src' -name '*_asm.S' -print0 | xargs -0 perl -i -ne 'print unless /^\\s*\\.(type|size)\\b/'", .{srcpath}),
-    });
-    strip.step.dependOn(last);
-
-    const rmbuild = b.addSystemCommand(&.{ "rm", "-rf", builddir });
-    rmbuild.step.dependOn(&strip.step);
-    const mkbuild = b.addSystemCommand(&.{ "mkdir", "-p", builddir });
-    mkbuild.step.dependOn(&rmbuild.step);
-
-    var conf_argv = std.array_list.Managed([]const u8).init(b.allocator);
-    conf_argv.append(b.fmt("{s}/configure", .{srcpath})) catch @panic("OOM");
-    conf_argv.appendSlice(conf.items) catch @panic("OOM");
-    conf_argv.appendSlice(&.{
-        b.fmt("CC={s}/cc", .{shimdir}),
-        b.fmt("AR={s}/ar", .{shimdir}),
-        b.fmt("RANLIB={s}/ranlib", .{shimdir}),
-        "C_EXTRA_FLAGS=-ffunction-sections -fdata-sections",
-    }) catch @panic("OOM");
-    const configure = b.addSystemCommand(conf_argv.items);
-    configure.setCwd(.{ .cwd_relative = builddir });
-    configure.addPathDir(shimdir);
-    configure.step.dependOn(&mkbuild.step);
-    configure.step.dependOn(&shim.step);
-
-    const njobs = std.Thread.getCpuCount() catch 4;
-    const make = b.addSystemCommand(&.{ "make", b.fmt("-j{d}", .{njobs}) });
-    make.setCwd(.{ .cwd_relative = builddir });
-    make.addPathDir(shimdir);
-    make.step.dependOn(&configure.step);
-
-    const rmdest = b.addSystemCommand(&.{ "rm", "-rf", dest });
-    rmdest.step.dependOn(&make.step);
-    const install_wolf = b.addSystemCommand(&.{ "make", "install" });
-    install_wolf.setCwd(.{ .cwd_relative = builddir });
-    install_wolf.addPathDir(shimdir);
-    install_wolf.step.dependOn(&rmdest.step);
-
-    var tail: *std.Build.Step = &install_wolf.step;
-    if (t.os.tag == .windows) {
-        const rename = b.addSystemCommand(&.{
-            "sh",                                                                                                      "-c",
-            b.fmt("[ -f '{0s}/libwolfssl.lib' ] && mv '{0s}/libwolfssl.lib' '{0s}/libwolfssl.a' || true", .{lib_dir}),
-        });
-        rename.step.dependOn(&install_wolf.step);
-        tail = &rename.step;
-    }
-
-    const stamp_wf = b.addWriteFiles();
-    const stamp_lp = stamp_wf.add(".build-flags", stamp);
-    const write_stamp = b.addSystemCommand(&.{"cp"});
-    write_stamp.addFileArg(stamp_lp);
-    write_stamp.addArg(b.fmt("{s}/.build-flags", .{dest}));
-    write_stamp.step.dependOn(tail);
-
-    wolf_step.dependOn(&write_stamp.step);
-    const w = Wolf{ .include_dir = include_dir, .lib_dir = lib_dir, .step = wolf_step };
-    wolf_cache.?.put(suffix, w) catch @panic("OOM");
-    return w;
-}
-
-fn shimScript(b: *std.Build, shimdir: []const u8, target_flag: []const u8, host_triple: []const u8) []const u8 {
-    var s: []const u8 = b.fmt("set -e\nmkdir -p '{s}'\n", .{shimdir});
-    const line = struct {
-        fn f(bb: *std.Build, cur: []const u8, dir: []const u8, name: []const u8, cmd: []const u8) []const u8 {
-            return bb.fmt("{s}printf '#!/bin/sh\\nexec {s} \"$@\"\\n' > '{s}/{s}'\nchmod +x '{s}/{s}'\n", .{ cur, cmd, dir, name, dir, name });
-        }
-    }.f;
-    const cc = b.fmt("zig cc {s}", .{target_flag});
-    s = line(b, s, shimdir, "cc", cc);
-    s = line(b, s, shimdir, "ar", "zig ar");
-    s = line(b, s, shimdir, "ranlib", "zig ranlib");
-    s = line(b, s, shimdir, "lib", "zig lib");
-    if (host_triple.len != 0) {
-        s = line(b, s, shimdir, b.fmt("{s}-gcc", .{host_triple}), cc);
-        s = line(b, s, shimdir, b.fmt("{s}-cc", .{host_triple}), cc);
-        s = line(b, s, shimdir, b.fmt("{s}-ar", .{host_triple}), "zig ar");
-        s = line(b, s, shimdir, b.fmt("{s}-ranlib", .{host_triple}), "zig ranlib");
-    }
-    return s;
-}
-
-fn exists(b: *std.Build, path: []const u8) bool {
-    std.Io.Dir.accessAbsolute(b.graph.io, path, .{}) catch return false;
-    return true;
-}
-
-fn installStep(b: *std.Build, exe: *std.Build.Step.Compile, target: std.Build.ResolvedTarget, out_dir: []const u8) *std.Build.Step {
-    const ext: []const u8 = if (target.result.os.tag == .windows) ".exe" else "";
-    const sub = if (target.query.isNative())
-        b.fmt("{s}{s}", .{ exe.name, ext })
-    else
-        b.fmt("{s}-{s}{s}", .{ exe.name, tripleSuffix(b, target), ext });
-    const ai = b.addInstallArtifact(exe, .{
-        .dest_dir = .{ .override = .{ .custom = out_dir } },
-        .dest_sub_path = sub,
-    });
-    return &ai.step;
-}
-
-var llhttp_done = false;
-var llhttp_step: ?*std.Build.Step = null;
-fn generateLlhttp(b: *std.Build) ?*std.Build.Step {
-    if (llhttp_done) return llhttp_step;
-    llhttp_done = true;
-
-    if (exists(b, b.pathFromRoot("cxx_modules/llhttp/build/c/llhttp.c"))) return null;
-    if (!exists(b, b.pathFromRoot("cxx_modules/llhttp"))) std.debug.panic(
-        "llhttp is missing: clone it first with\n  git clone https://github.com/nodejs/llhttp cxx_modules/llhttp\n(build.zig then runs `npm ci && npm run build` for you)",
-        .{},
-    );
-
-    const dir = b.pathFromRoot("cxx_modules/llhttp");
-    const gen = b.step("llhttp", "Generate llhttp C sources (npm ci && npm run build)");
-    const ci = b.addSystemCommand(&.{ "npm", "ci" });
-    ci.setCwd(.{ .cwd_relative = dir });
-    const bld = b.addSystemCommand(&.{ "npm", "run", "build" });
-    bld.setCwd(.{ .cwd_relative = dir });
-    bld.step.dependOn(&ci.step);
-    gen.dependOn(&bld.step);
-
-    llhttp_step = gen;
-    return gen;
+  const install = b.addInstallArtifact(executable, .{
+    .dest_dir = .{ .override = .{ .custom = out_dir } },
+    .dest_sub_path = sub_path,
+  });
+  return &install.step;
 }
 
 fn resolveTriple(b: *std.Build, triple: []const u8) std.Build.ResolvedTarget {
-    const q = std.Target.Query.parse(.{ .arch_os_abi = triple }) catch @panic("bad triple");
-    return b.resolveTargetQuery(q);
+  const query = std.Target.Query.parse(.{ .arch_os_abi = triple }) catch @panic("bad triple");
+  return b.resolveTargetQuery(query);
 }
 
 fn tripleSuffix(b: *std.Build, target: std.Build.ResolvedTarget) []const u8 {
-    if (target.query.isNative()) return "host";
-    return target.query.zigTriple(b.allocator) catch @panic("OOM");
+  if (target.query.isNative()) {
+    return "host";
+  }
+  return target.query.zigTriple(b.allocator) catch @panic("OOM");
 }
 
-fn glob(b: *std.Build, dir_rel: []const u8, ext: []const u8) []const []const u8 {
-    const io = b.graph.io;
-    var out = std.array_list.Managed([]const u8).init(b.allocator);
-    var dir = b.build_root.handle.openDir(io, dir_rel, .{ .iterate = true }) catch |e| std.debug.panic("open {s}: {}", .{ dir_rel, e });
-    defer dir.close(io);
-    var it = dir.iterate();
-    while (it.next(io) catch @panic("iterate")) |entry| {
-        if (entry.kind != .file) continue;
-        if (!std.mem.endsWith(u8, entry.name, ext)) continue;
-        out.append(b.fmt("{s}/{s}", .{ dir_rel, entry.name })) catch @panic("OOM");
+fn listFiles(b: *std.Build, dir_relative: []const u8, extension: []const u8) []const []const u8 {
+  const io = b.graph.io;
+  var found: std.ArrayList([]const u8) = .empty;
+  var dir = b.build_root.handle.openDir(io, dir_relative, .{ .iterate = true }) catch |failure| std.debug.panic("open {s}: {}", .{ dir_relative, failure });
+  defer dir.close(io);
+
+  var it = dir.iterate();
+
+  while (it.next(io) catch @panic("iterate")) |entry| {
+    if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, extension)) {
+      continue;
     }
-    return out.items;
+    found.append(b.allocator, b.dupe(entry.name)) catch @panic("OOM");
+  }
+  return found.items;
 }
 
-fn stampOk(b: *std.Build, suffix: []const u8, stamp: []const u8) bool {
-    const io = b.graph.io;
-    const a_rel = b.fmt("cxx_modules/wolfssl/{s}/lib/libwolfssl.a", .{suffix});
-    const flags_rel = b.fmt("cxx_modules/wolfssl/{s}/.build-flags", .{suffix});
-    b.build_root.handle.access(io, a_rel, .{}) catch return false;
-    const got = b.build_root.handle.readFileAlloc(io, flags_rel, b.allocator, .limited(1 << 16)) catch return false;
-    return std.mem.eql(u8, std.mem.trimEnd(u8, got, "\n"), stamp);
+fn listPaths(b: *std.Build, dir_relative: []const u8, extension: []const u8) []const []const u8 {
+  var paths: std.ArrayList([]const u8) = .empty;
+
+  for (listFiles(b, dir_relative, extension)) |name| {
+    paths.append(b.allocator, b.fmt("{s}/{s}", .{ dir_relative, name })) catch @panic("OOM");
+  }
+  return paths.items;
 }

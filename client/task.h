@@ -6,7 +6,7 @@
 #include <vector>
 
 #include "protocol.h"
-#include "chan.h"
+#include "muypoco/chan.h"
 
 namespace dicker {
 
@@ -16,10 +16,11 @@ struct Task {
   dicker::UnitType type;
   char pathname[PATH_CAP];
   size_t offset, length;
+  uint64_t fileSize;
 };
 
 struct WorkerTask : Task {
-  std::shared_ptr<Completion> completion;
+  std::shared_ptr<muypoco::Completion> completion;
 
   WorkerTask() = default;
 
@@ -27,8 +28,9 @@ struct WorkerTask : Task {
     dicker::UnitType type,
     const char* path,
     size_t offset,
-    size_t length
-  ) : Task{type, {}, offset, length}
+    size_t length,
+    uint64_t fileSize
+  ) : Task{type, {}, offset, length, fileSize}
   {
     std::strncpy(this->pathname, path, PATH_CAP - 1);
     this->pathname[PATH_CAP - 1] = '\0';
@@ -36,12 +38,12 @@ struct WorkerTask : Task {
 };
 
 struct ReadRequest : Task {
-  std::shared_ptr<Completion> completion;
+  std::shared_ptr<muypoco::Completion> completion;
 };
 
 struct NetworkTask {
   std::vector<uint8_t> data; //TODO no zero-alloc ;(
-  std::shared_ptr<Completion> completion;
+  std::shared_ptr<muypoco::Completion> completion;
 
   NetworkTask() = default;
 
@@ -51,7 +53,7 @@ struct NetworkTask {
 
 struct UploaderTask {
   std::string fn;
-  std::shared_ptr<Completion> completion;
+  std::shared_ptr<muypoco::Completion> completion;
 };
 
 }  // namespace dicker

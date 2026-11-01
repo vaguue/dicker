@@ -8,3 +8,5 @@ dwn/
 systemd.sh
 .zig-cache
 misc
+zig-pkg/
+zig-out

@@ -1,0 +1,38 @@
+.{
+    .name = .dicker,
+    .version = "0.1.0",
+    .fingerprint = 0x7d150a0d12a70746,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .muypoco = .{
+            .url = "git+https://github.com/vaguue/muypoco#d481fa743d3a8cea7f4a4c522f40f5a6ba035320",
+            .hash = "muypoco-0.1.0-oqL96fP_AACYMFGMwii_Jm_ibCR4q4jKBDUX0hy7duZG",
+        },
+        .zstd = .{
+            .url = "https://github.com/facebook/zstd/archive/refs/tags/v1.5.6.tar.gz",
+            .hash = "N-V-__8AAKbffQDMlwdeMxqHyyAcA6AYoVIjJdaqhEYZpGFG",
+        },
+        .lz4 = .{
+            .url = "https://github.com/lz4/lz4/archive/refs/tags/v1.10.0.tar.gz",
+            .hash = "N-V-__8AAPaNGQD6bmfRjArvYAnsL8DYxbXiNxVE_B6HRpUx",
+        },
+        .wolfssl = .{
+            .url = "https://github.com/wolfSSL/wolfssl/archive/refs/tags/v5.7.4-stable.tar.gz",
+            .hash = "N-V-__8AAEjx9wWniv0GbXDtkjLTfDChFJEJlxofK6bBjify",
+        },
+        .libuv = .{
+            .url = "https://github.com/libuv/libuv/archive/refs/tags/v1.51.0.tar.gz",
+            .hash = "N-V-__8AABtNRAB58M85Dm0p6z6iRHP3Zz3eyo08HU4EF5mq",
+            .lazy = true,
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "README.md",
+        "client",
+        "shared",
+        "server",
+        "cxx_modules/json.hpp",
+    },
+}

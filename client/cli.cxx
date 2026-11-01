@@ -4,7 +4,7 @@
 #include <string>
 #include <vector>
 
-#include "dicker.h"
+#include "dicker/dicker.h"
 
 namespace {
 

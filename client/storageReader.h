@@ -11,7 +11,7 @@
   #include <unistd.h>
 #endif
 
-#include "chan.h"
+#include "muypoco/chan.h"
 #include "ring.h"
 #include "task.h"
 #include "storage.h"
@@ -93,7 +93,7 @@ struct ReadFileHandle {
 #endif
 };
 
-struct StorageReader : Chan<StorageReader, ReadRequest, 8> {
+struct StorageReader {
   Storage* storage;
 
   uint8_t bufs[READ_AHEAD][READ_BLOCK];
@@ -107,11 +107,15 @@ struct StorageReader : Chan<StorageReader, ReadRequest, 8> {
   }
 
   ~StorageReader() {
+    this->close();
+  }
+
+  void close() {
     this->spare.close();
     this->ready.close();
   }
 
-  void process(ReadRequest& req) {
+  void process(ReadRequest& req) noexcept {
     std::string resolved = this->storage->resolve(req.pathname);
 
     this->storage->diskLimit.acquire();
@@ -148,16 +152,6 @@ struct StorageReader : Chan<StorageReader, ReadRequest, 8> {
     this->ready.push(Filled{0, 0, true});
   }
 
-  void submit(dicker::UnitType type, const char* path, uint64_t offset, uint64_t length) {
-    ReadRequest req;
-    req.type = type;
-    std::strncpy(req.pathname, path, PATH_CAP - 1);
-    req.pathname[PATH_CAP - 1] = '\0';
-    req.offset = offset;
-    req.length = length;
-    this->enqueue(req);
-  }
-
   bool next(Filled& out) {
     return this->ready.pop(out);
   }
@@ -170,4 +164,16 @@ struct StorageReader : Chan<StorageReader, ReadRequest, 8> {
     return this->bufs[idx];
   }
 };
+
+using StorageReaderChan = muypoco::Chan<StorageReader, ReadRequest, 8>;
+
+inline void submit(StorageReaderChan& reader, dicker::UnitType type, const char* path, uint64_t offset, uint64_t length) {
+  ReadRequest req;
+  req.type = type;
+  std::strncpy(req.pathname, path, PATH_CAP - 1);
+  req.pathname[PATH_CAP - 1] = '\0';
+  req.offset = offset;
+  req.length = length;
+  reader.enqueue(req);
+}
 }  // namespace dicker
