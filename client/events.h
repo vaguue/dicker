@@ -19,6 +19,14 @@ struct UploadStarted {
   uint64_t fileSize;
 };
 
+struct UploadSkipped {
+  std::string_view path;
+  UnitType type;
+  uint64_t offset;
+  uint64_t length;
+  uint64_t fileSize;
+};
+
 struct UploadFinished {
   std::string_view path;
   UnitType type;

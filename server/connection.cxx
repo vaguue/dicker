@@ -81,7 +81,8 @@ namespace dicker {
 
     struct ReplyWrite {
       uv_write_t request;
-      std::uint8_t data[kHandshakeReplySize];
+      std::uint8_t data[kHandshakeReplySize + kHandshakeModeSize];
+      std::size_t size;
       Connection* connection;
       bool teardown_after;
     };
@@ -153,6 +154,8 @@ namespace dicker {
     connection->resume_async_.data = connection;
     uv_async_init(loop, &connection->close_async_, on_close_async);
     connection->close_async_.data = connection;
+    uv_async_init(loop, &connection->outbox_async_, on_outbox_async);
+    connection->outbox_async_.data = connection;
 
     if (uv_accept(listener, reinterpret_cast<uv_stream_t*>(&connection->tcp_)) != 0) {
       connection->begin_teardown();
@@ -268,6 +271,8 @@ namespace dicker {
       if (!decompressor_ || !sink_) {
         status = HandshakeStatus::ServerError;
       }
+      protocol_version_ = request.version;
+      mode_ = server_->mode_for(request.version);
     }
 
     send_handshake_reply(status);
@@ -476,12 +481,19 @@ namespace dicker {
   }
 
   void Connection::send_handshake_reply(HandshakeStatus status) {
-    if (tls_active_) {
-      std::uint8_t data[kHandshakeReplySize];
-      std::memcpy(data, kMagic.data(), kMagic.size());
-      data[kMagic.size()] = static_cast<std::uint8_t>(status);
+    std::uint8_t data[kHandshakeReplySize + kHandshakeModeSize];
+    std::size_t size = kHandshakeReplySize;
 
-      if (!tls_.send(this, data, sizeof data, status != HandshakeStatus::Ok)) {
+    std::memcpy(data, kMagic.data(), kMagic.size());
+    data[kMagic.size()] = static_cast<std::uint8_t>(status);
+
+    if (status == HandshakeStatus::Ok && protocol_version_ >= 2) {
+      data[size] = mode_;
+      size += kHandshakeModeSize;
+    }
+
+    if (tls_active_) {
+      if (!tls_.send(this, data, size, status != HandshakeStatus::Ok)) {
         begin_teardown();
         return;
       }
@@ -489,13 +501,13 @@ namespace dicker {
     }
 
     ReplyWrite* reply = new ReplyWrite();
-    std::memcpy(reply->data, kMagic.data(), kMagic.size());
-    reply->data[kMagic.size()] = static_cast<std::uint8_t>(status);
+    std::memcpy(reply->data, data, size);
+    reply->size = size;
     reply->connection = this;
     reply->teardown_after = status != HandshakeStatus::Ok;
     reply->request.data = reply;
 
-    uv_buf_t buffer = uv_buf_init(reinterpret_cast<char*>(reply->data), kHandshakeReplySize);
+    uv_buf_t buffer = uv_buf_init(reinterpret_cast<char*>(reply->data), static_cast<unsigned int>(reply->size));
     int result = uv_write(&reply->request, reinterpret_cast<uv_stream_t*>(&tcp_),
                           &buffer, 1, on_write_reply);
     if (result != 0) {
@@ -541,6 +553,36 @@ namespace dicker {
     }
   }
 
+  void Connection::post(const std::uint8_t* data, std::size_t len) {
+    {
+      std::lock_guard<std::mutex> lock(outbox_mutex_);
+      outbox_.insert(outbox_.end(), data, data + len);
+    }
+    uv_async_send(&outbox_async_);
+  }
+
+  void Connection::on_outbox_async(uv_async_t* handle) {
+    Connection* connection = static_cast<Connection*>(handle->data);
+    std::vector<std::uint8_t> pending;
+
+    {
+      std::lock_guard<std::mutex> lock(connection->outbox_mutex_);
+      pending.swap(connection->outbox_);
+    }
+
+    if (pending.empty() || connection->teardown_started_) {
+      return;
+    }
+
+    if (connection->tls_active_) {
+      if (!connection->tls_.send(connection, pending.data(), pending.size(), false)) {
+        connection->begin_teardown();
+      }
+      return;
+    }
+    connection->tls_write(pending.data(), pending.size(), false);
+  }
+
   void Connection::on_resume_async(uv_async_t* handle) {
     Connection* connection = static_cast<Connection*>(handle->data);
     if (connection->state_ == State::Streaming && connection->paused_) {
@@ -568,6 +610,60 @@ namespace dicker {
     uv_async_send(&close_async_);
   }
 
+  bool Connection::handle_probe() {
+    std::uint8_t head[8 + 1 + 2];
+    if (!channel_.read_exact(head, sizeof head)) {
+      return false;
+    }
+
+    const std::uint64_t key = read_u64_le(head);
+    const UnitType type = static_cast<UnitType>(head[8]);
+    const std::uint16_t path_len = read_u16_le(head + 9);
+
+    if ((type != UnitType::File && type != UnitType::Chunk) || path_len == 0 || path_len > kMaxPathLength) {
+      return false;
+    }
+
+    std::string path(path_len, '\0');
+    std::uint8_t sizes[8 * 4];
+    std::uint8_t hash[kProbeHashSize];
+    const bool hash_first = has_mode(mode_, ServerMode::HashFirst);
+
+    if (!channel_.read_exact(reinterpret_cast<std::uint8_t*>(path.data()), path_len) ||
+        !channel_.read_exact(sizes, sizeof sizes) ||
+        (hash_first && !channel_.read_exact(hash, sizeof hash))) {
+      return false;
+    }
+
+    server::Probe probe{
+      session_hex_,
+      peer_,
+      path,
+      type,
+      read_u64_le(sizes),
+      read_u64_le(sizes + 8),
+      read_u64_le(sizes + 16),
+      static_cast<std::int64_t>(read_u64_le(sizes + 24)),
+      hash_first ? std::span<const std::uint8_t>(hash, sizeof hash) : std::span<const std::uint8_t>(),
+    };
+
+    const bool accepted = server_->filter_(probe);
+
+    if (accepted) {
+      accepted_[key] = AcceptedUnit{type, path, probe.offset};
+    }
+    else {
+      server::events.emit<"upload:skipped">(server::UploadSkipped{
+        session_hex_, peer_, path, type, probe.offset, probe.length});
+    }
+
+    std::uint8_t reply[kProbeReplySize];
+    reply[0] = static_cast<std::uint8_t>(accepted ? ProbeDecision::Accept : ProbeDecision::Reject);
+    write_u64_le(reply + 1, key);
+    post(reply, sizeof reply);
+    return true;
+  }
+
   void Connection::handle_upload() {
     std::vector<std::uint8_t> input_buffer;
 
@@ -580,31 +676,68 @@ namespace dicker {
       if (type == UnitType::End) {
         break;
       }
-      if (type != UnitType::File && type != UnitType::Chunk) {
-        break;
-      }
 
-      std::uint8_t path_len_bytes[2];
-      if (!channel_.read_exact(path_len_bytes, 2)) {
-        break;
-      }
-      std::uint16_t path_len = read_u16_le(path_len_bytes);
-      if (path_len == 0 || path_len > kMaxPathLength) {
-        break;
-      }
+      const bool accept_mode = has_mode(mode_, ServerMode::Accept);
 
-      std::string path(path_len, '\0');
-      if (!channel_.read_exact(reinterpret_cast<std::uint8_t*>(path.data()), path_len)) {
-        break;
-      }
-
-      std::uint64_t base_offset = 0;
-      if (type == UnitType::Chunk) {
-        std::uint8_t offset_bytes[8];
-        if (!channel_.read_exact(offset_bytes, 8)) {
+      if (type == UnitType::Probe) {
+        if (!accept_mode || !handle_probe()) {
           break;
         }
-        base_offset = read_u64_le(offset_bytes);
+        continue;
+      }
+
+      std::string path;
+      std::uint64_t base_offset = 0;
+
+      if (type == UnitType::Accepted) {
+        std::uint8_t key_bytes[8];
+        if (!accept_mode || !channel_.read_exact(key_bytes, 8)) {
+          break;
+        }
+
+        auto found = accepted_.find(read_u64_le(key_bytes));
+        if (found == accepted_.end()) {
+          std::fprintf(stderr, "unknown unit key session=%s from %s\n",
+                       session_hex_.c_str(), peer_.c_str());
+          break;
+        }
+
+        type = found->second.type;
+        path = std::move(found->second.path);
+        base_offset = found->second.offset;
+        accepted_.erase(found);
+      }
+      else if (type == UnitType::File || type == UnitType::Chunk) {
+        if (accept_mode) {
+          std::fprintf(stderr, "unit without probe in accept mode session=%s from %s\n",
+                       session_hex_.c_str(), peer_.c_str());
+          break;
+        }
+
+        std::uint8_t path_len_bytes[2];
+        if (!channel_.read_exact(path_len_bytes, 2)) {
+          break;
+        }
+        std::uint16_t path_len = read_u16_le(path_len_bytes);
+        if (path_len == 0 || path_len > kMaxPathLength) {
+          break;
+        }
+
+        path.assign(path_len, '\0');
+        if (!channel_.read_exact(reinterpret_cast<std::uint8_t*>(path.data()), path_len)) {
+          break;
+        }
+
+        if (type == UnitType::Chunk) {
+          std::uint8_t offset_bytes[8];
+          if (!channel_.read_exact(offset_bytes, 8)) {
+            break;
+          }
+          base_offset = read_u64_le(offset_bytes);
+        }
+      }
+      else {
+        break;
       }
 
       if (type == UnitType::Chunk) {
@@ -770,6 +903,7 @@ namespace dicker {
     close_handle(reinterpret_cast<uv_handle_t*>(&tcp_));
     close_handle(reinterpret_cast<uv_handle_t*>(&resume_async_));
     close_handle(reinterpret_cast<uv_handle_t*>(&close_async_));
+    close_handle(reinterpret_cast<uv_handle_t*>(&outbox_async_));
   }
 
   void Connection::close_handle(uv_handle_t* handle) {

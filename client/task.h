@@ -17,6 +17,7 @@ struct Task {
   char pathname[PATH_CAP];
   size_t offset, length;
   uint64_t fileSize;
+  int64_t mtime;
 };
 
 struct WorkerTask : Task {
@@ -29,8 +30,9 @@ struct WorkerTask : Task {
     const char* path,
     size_t offset,
     size_t length,
-    uint64_t fileSize
-  ) : Task{type, {}, offset, length, fileSize}
+    uint64_t fileSize,
+    int64_t mtime
+  ) : Task{type, {}, offset, length, fileSize, mtime}
   {
     std::strncpy(this->pathname, path, PATH_CAP - 1);
     this->pathname[PATH_CAP - 1] = '\0';

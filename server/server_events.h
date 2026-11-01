@@ -42,6 +42,16 @@ namespace dicker::server {
     std::string_view reason;
   };
 
+  // "upload:skipped": the server's filter rejected the unit, nothing was sent.
+  struct UploadSkipped {
+    std::string_view session;
+    std::string_view peer;
+    std::string_view path;
+    UnitType type;
+    std::uint64_t offset;
+    std::uint64_t length;
+  };
+
   // "client:disconnected": the uploader's connection closed.
   struct ClientDisconnected {
     std::string_view session;

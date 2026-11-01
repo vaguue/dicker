@@ -25,6 +25,10 @@
             .hash = "N-V-__8AABtNRAB58M85Dm0p6z6iRHP3Zz3eyo08HU4EF5mq",
             .lazy = true,
         },
+        .blake3 = .{
+            .url = "https://github.com/BLAKE3-team/BLAKE3/archive/refs/tags/1.8.2.tar.gz",
+            .hash = "N-V-__8AAIyLGwDhu0MQYSJsE6rKHgVnwaxYQBOuPHVm1qOA",
+        },
     },
     .paths = .{
         "build.zig",

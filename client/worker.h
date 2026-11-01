@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 #include <cstdio>
@@ -9,9 +10,12 @@
 #include <cstddef>
 #include <algorithm>
 #include <stdexcept>
+#include <string_view>
 
 #define XXH_INLINE_ALL
 #include "xxhash.h"
+
+#include "blake3.h"
 
 #include "protocol.h"
 #include "wire.h"
@@ -56,19 +60,32 @@ inline const char* handshakeStatusName(std::uint8_t s) {
   }
 }
 
+struct PendingUnit {
+  uint64_t key;
+  Task task;
+  bool accepted;
+};
+
 struct Worker {
+  static constexpr size_t kProbeWindow = 128;
+
   uint8_t outBuf[OUT_BUF_SIZE];
 
   bool integrity = false;
+  bool acceptMode = false;
+  bool hashFirst = false;
+  uint64_t nextKey = 0;
+  std::vector<PendingUnit> pending;
+  muypoco::Chan<Worker, WorkerTask, 128>* chan = nullptr;
 
   std::atomic<AffinityKey> warm{NONE};
   std::shared_ptr<StorageReaderChan> storage;
   std::unique_ptr<StreamCompressor> compressor;
   Conn conn;
-  NetworkChan network;
+  std::optional<NetworkChan> network;
 
   Worker(std::unique_ptr<StreamCompressor> compressor, std::shared_ptr<StorageReaderChan> storage, Conn conn)
-    : storage{std::move(storage)}, compressor{std::move(compressor)}, conn{std::move(conn)}, network{this->conn} {
+    : storage{std::move(storage)}, compressor{std::move(compressor)}, conn{std::move(conn)} {
   }
 
   bool init() noexcept {
@@ -81,26 +98,58 @@ struct Worker {
       this->conn.key.size(),
       hex(this->conn.sessionId.data(), this->conn.sessionId.size()).c_str());
 
-    this->network.start();
-
-    if (!this->network.awaitInit()) {
-      log().error("network init failed");
+    if (!this->connect()) {
       return false;
     }
 
-    auto hs = this->handshake(this->conn);
+    int status = this->shake(kProtocolVersion);
+
+    if (status == static_cast<int>(HandshakeStatus::BadVersion)) {
+      log().info("server only speaks protocol %u, reconnecting", static_cast<unsigned>(kMinProtocolVersion));
+
+      if (!this->connect()) {
+        return false;
+      }
+      status = this->shake(kMinProtocolVersion);
+    }
+
+    if (status != 0) {
+      if (status > 0) {
+        log().error("handshake rejected by server: %s", handshakeStatusName(static_cast<std::uint8_t>(status)));
+      }
+      return false;
+    }
+
+    log().info("handshake ok accept=%d hash=%d", this->acceptMode ? 1 : 0, this->hashFirst ? 1 : 0);
+    return true;
+  }
+
+  bool connect() {
+    this->network.reset();
+    this->network.emplace(this->conn);
+    this->network->start();
+
+    if (!this->network->awaitInit()) {
+      log().error("network init failed");
+      return false;
+    }
+    return true;
+  }
+
+  int shake(uint16_t version) {
+    auto hs = this->handshake(this->conn, version);
     log().info("handshake(%zu)=%s", hs.size(), hex(hs.data(), hs.size()).c_str());
 
-    if (!this->network.await({hs.data(), hs.size()})) {
+    if (!this->network->await({hs.data(), hs.size()})) {
       log().error("failed to send handshake");
-      return false;
+      return -1;
     }
 
     uint8_t reply[kHandshakeReplySize];
 
-    if (!this->network.worker.recvExact(reply, sizeof(reply))) {
+    if (!this->network->worker.recvExact(reply, sizeof(reply))) {
       log().error("no handshake reply (timeout or server closed the connection)");
-      return false;
+      return -1;
     }
 
     const std::uint8_t status = reply[kMagic.size()];
@@ -109,21 +158,27 @@ struct Worker {
                hex(reply, sizeof(reply)).c_str(), status, handshakeStatusName(status));
 
     if (status != 0) {
-      log().error("handshake rejected by server: %s", handshakeStatusName(status));
-      return false;
+      return status;
     }
 
-    log().info("handshake ok");
+    uint8_t mode = 0;
 
-    return true;
+    if (version >= 2 && !this->network->worker.recvExact(&mode, sizeof(mode))) {
+      log().error("no server mode in the handshake reply");
+      return -1;
+    }
+
+    this->acceptMode = has_mode(mode, ServerMode::Accept);
+    this->hashFirst = has_mode(mode, ServerMode::HashFirst);
+    return 0;
   }
 
-  std::vector<uint8_t> handshake(const Conn& conn) {
+  std::vector<uint8_t> handshake(const Conn& conn, uint16_t version) {
     std::vector<uint8_t> out;
 
     out.insert(out.end(), kMagic.begin(), kMagic.end());
 
-    append_u16(out, kProtocolVersion);
+    append_u16(out, version);
     out.push_back(conn.flags);
     out.push_back(static_cast<uint8_t>(this->compressor->algo));
     out.insert(out.end(), conn.sessionId.begin(), conn.sessionId.end());
@@ -143,10 +198,10 @@ struct Worker {
     header[0] = static_cast<uint8_t>(BlockType::Data);
     write_u32_le(header + 1, static_cast<uint32_t>(len));
 
-    if (!this->network.enqueue({header, sizeof(header)})) {
+    if (!this->network->enqueue({header, sizeof(header)})) {
       return false;
     }
-    return this->network.enqueue({data, len});
+    return this->network->enqueue({data, len});
   }
 
   void drainStorage() {
@@ -160,31 +215,128 @@ struct Worker {
   }
 
   bool process(const Task& t) noexcept {
-    const std::string_view path = t.pathname;
+    if (!this->acceptMode) {
+      return this->send(t, this->unitHeader(t));
+    }
 
-    events.emit<"upload:started">(UploadStarted{path, t.type, t.offset, t.length, t.fileSize});
-
-    uint64_t compressedBytes = 0;
-    const bool ok = this->upload(t, compressedBytes);
-
-    events.emit<"upload:finished">(UploadFinished{path, t.type, t.offset, t.length, t.fileSize, compressedBytes, ok});
-    return ok;
+    if (!this->probe(t)) {
+      return false;
+    }
+    if (this->pending.size() >= kProbeWindow || this->chan == nullptr || this->chan->occupancy() == 0) {
+      return this->resolve();
+    }
+    return true;
   }
 
-  bool upload(const Task& t, uint64_t& compressedBytes) noexcept {
+  std::vector<uint8_t> unitHeader(const Task& t) {
     std::vector<uint8_t> header;
+    const std::string_view path = t.pathname;
 
     header.push_back(static_cast<uint8_t>(t.type));
-
-    std::string path = t.pathname;
-
     append_u16(header, static_cast<uint16_t>(path.size()));
     header.insert(header.end(), path.begin(), path.end());
 
     if (t.type == UnitType::Chunk) {
       append_u64(header, t.offset);
     }
-    if (!this->network.enqueue({header.data(), header.size()})) {
+    return header;
+  }
+
+  std::vector<uint8_t> acceptedHeader(uint64_t key) {
+    std::vector<uint8_t> header;
+
+    header.push_back(static_cast<uint8_t>(UnitType::Accepted));
+    append_u64(header, key);
+    return header;
+  }
+
+  void hashUnit(const Task& t, uint8_t* out) {
+    blake3_hasher hasher;
+    blake3_hasher_init(&hasher);
+
+    submit(*this->storage, t.type, t.pathname, t.offset, t.length);
+
+    Filled fb;
+    while (this->storage->worker.next(fb)) {
+      if (fb.eof) {
+        break;
+      }
+      blake3_hasher_update(&hasher, this->storage->worker.data(fb.idx), fb.len);
+      this->storage->worker.recycle(fb.idx);
+    }
+
+    blake3_hasher_finalize(&hasher, out, kProbeHashSize);
+  }
+
+  bool probe(const Task& t) {
+    const uint64_t key = this->nextKey++;
+    const std::string_view path = t.pathname;
+    std::vector<uint8_t> frame;
+
+    frame.push_back(static_cast<uint8_t>(UnitType::Probe));
+    append_u64(frame, key);
+    frame.push_back(static_cast<uint8_t>(t.type));
+    append_u16(frame, static_cast<uint16_t>(path.size()));
+    frame.insert(frame.end(), path.begin(), path.end());
+    append_u64(frame, t.offset);
+    append_u64(frame, t.length);
+    append_u64(frame, t.fileSize);
+    append_u64(frame, static_cast<uint64_t>(t.mtime));
+
+    if (this->hashFirst) {
+      uint8_t hash[kProbeHashSize];
+      this->hashUnit(t, hash);
+      frame.insert(frame.end(), hash, hash + kProbeHashSize);
+    }
+
+    this->pending.push_back(PendingUnit{key, t, false});
+    return this->network->enqueue({frame.data(), frame.size()});
+  }
+
+  bool resolve() {
+    const bool drained = this->network->await({nullptr, 0});
+    bool ok = drained;
+
+    for (PendingUnit& unit : this->pending) {
+      uint8_t reply[kProbeReplySize];
+
+      if (!ok || !this->network->worker.recvExact(reply, sizeof(reply)) || read_u64_le(reply + 1) != unit.key) {
+        ok = false;
+        break;
+      }
+      unit.accepted = reply[0] == static_cast<uint8_t>(ProbeDecision::Accept);
+    }
+
+    for (const PendingUnit& unit : this->pending) {
+      if (!ok) {
+        break;
+      }
+      if (unit.accepted) {
+        ok = this->send(unit.task, this->acceptedHeader(unit.key));
+      }
+      else {
+        events.emit<"upload:skipped">(UploadSkipped{unit.task.pathname, unit.task.type, unit.task.offset, unit.task.length, unit.task.fileSize});
+      }
+    }
+
+    this->pending.clear();
+    return ok;
+  }
+
+  bool send(const Task& t, const std::vector<uint8_t>& header) noexcept {
+    const std::string_view path = t.pathname;
+
+    events.emit<"upload:started">(UploadStarted{path, t.type, t.offset, t.length, t.fileSize});
+
+    uint64_t compressedBytes = 0;
+    const bool ok = this->upload(t, header, compressedBytes);
+
+    events.emit<"upload:finished">(UploadFinished{path, t.type, t.offset, t.length, t.fileSize, compressedBytes, ok});
+    return ok;
+  }
+
+  bool upload(const Task& t, const std::vector<uint8_t>& header, uint64_t& compressedBytes) noexcept {
+    if (!this->network->enqueue({header.data(), header.size()})) {
       return false;
     }
 
@@ -229,14 +381,14 @@ struct Worker {
     }
 
     uint8_t endOfUnit = static_cast<uint8_t>(BlockType::EndOfUnit);
-    if (!this->network.enqueue({&endOfUnit, 1})) {
+    if (!this->network->enqueue({&endOfUnit, 1})) {
       return false;
     }
 
     if (this->integrity) {
       uint8_t checksumBytes[8];
       write_u64_le(checksumBytes, XXH64_digest(&checksum));
-      if (!this->network.enqueue({checksumBytes, sizeof(checksumBytes)})) {
+      if (!this->network->enqueue({checksumBytes, sizeof(checksumBytes)})) {
         return false;
       }
     }
@@ -246,7 +398,7 @@ struct Worker {
 
   void finish() {
     auto eof = static_cast<uint8_t>(UnitType::End);
-    this->network.enqueue({&eof, 1});
+    this->network->enqueue({&eof, 1});
   }
 };
 

@@ -2,7 +2,10 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <mutex>
 #include <string>
+#include <unordered_set>
+#include <utility>
 
 #include "dicker/http_context.h"
 #include "dicker/server.h"
@@ -12,11 +15,30 @@ struct Stats {
   std::atomic<std::uint64_t> clients{0};
   std::atomic<std::uint64_t> uploads{0};
   std::atomic<std::uint64_t> failed{0};
+  std::atomic<std::uint64_t> skipped{0};
   std::atomic<std::uint64_t> bytes{0};
   std::atomic<std::uint64_t> compressedBytes{0};
 };
 
 Stats stats;
+
+struct Seen {
+  std::mutex lock;
+  std::unordered_set<std::string> units;
+
+  bool add(const dicker::server::Probe& probe) {
+    std::string key(probe.path);
+    key += '\0';
+    key += std::to_string(probe.offset);
+    key += '\0';
+    key.append(reinterpret_cast<const char*>(probe.hash.data()), probe.hash.size());
+
+    std::lock_guard<std::mutex> guard(this->lock);
+    return this->units.emplace(std::move(key)).second;
+  }
+};
+
+Seen seen;
 
 std::string number(const std::atomic<std::uint64_t>& value) {
   return std::to_string(value.load());
@@ -63,13 +85,19 @@ int main(int argc, char** argv) {
     }
   });
 
+  dicker::server::events.on<"upload:skipped">([](const dicker::server::UploadSkipped&) noexcept {
+    stats.skipped++;
+  });
+
   dicker::ServerConfig config;
   config.key = key;
   config.root = argv[1];
-  config.channel_high_water = 64 * 1024 * 1024;
-  config.channel_low_water = 16 * 1024 * 1024;
 
   dicker::Server server(config);
+
+  server.filter([](const dicker::server::Probe& probe) {
+    return seen.add(probe);
+  }, dicker::server::ProbeHash::blake3);
 
   server.route("GET", "/health", [](dicker::HttpContext& ctx) {
     ctx.body = "ok\n";
@@ -80,6 +108,7 @@ int main(int argc, char** argv) {
     ctx.body = "{\"clients\":" + number(stats.clients) +
                ",\"uploads\":" + number(stats.uploads) +
                ",\"failed\":" + number(stats.failed) +
+               ",\"skipped\":" + number(stats.skipped) +
                ",\"bytes\":" + number(stats.bytes) +
                ",\"compressedBytes\":" + number(stats.compressedBytes) + "}\n";
   });

@@ -6,8 +6,6 @@
 
 namespace {
 
-  constexpr std::size_t kDefaultHighWater = 8u * 1024 * 1024;
-  constexpr std::size_t kDefaultLowWater = 2u * 1024 * 1024;
   constexpr int kDefaultPort = 5959;
 
   struct Options {
@@ -15,8 +13,8 @@ namespace {
     int port = kDefaultPort;
     std::string root;
     std::string key;
-    std::size_t high_water = kDefaultHighWater;
-    std::size_t low_water = kDefaultLowWater;
+    std::size_t high_water = dicker::ServerConfig{}.channel_high_water;
+    std::size_t low_water = dicker::ServerConfig{}.channel_low_water;
   };
 
   bool matches(const char* argument, const char* name) {

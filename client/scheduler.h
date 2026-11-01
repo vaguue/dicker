@@ -7,6 +7,7 @@
 #include <regex>
 #include <cstring>
 #include <algorithm>
+#include <chrono>
 #include <filesystem>
 
 #include "protocol.h"
@@ -29,6 +30,11 @@ inline std::string toUtf8(const fs::path& p) {
 #else
   return p.u8string();
 #endif
+}
+
+inline int64_t unixNanoseconds(fs::file_time_type time) {
+  const auto system = std::chrono::file_clock::to_sys(time);
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(system.time_since_epoch()).count();
 }
 
 inline std::string toGenericUtf8(const fs::path& p) {
@@ -157,6 +163,7 @@ struct Scheduler { //TODO add a stop method
         this->readers[i],
         cfg.conn)
       );
+      this->workers.back()->worker.chan = this->workers.back().get();
     }
   }
 
@@ -287,6 +294,9 @@ struct Scheduler { //TODO add a stop method
       return true;
     }
 
+    const auto written = entry.last_write_time(ec);
+    const int64_t mtime = ec ? 0 : unixNanoseconds(written);
+
     if (size >= this->cfg.bigFileThreshold) {
       const uint64_t chunkSize = this->cfg.chunkSize;
       size_t n = 0;
@@ -296,7 +306,7 @@ struct Scheduler { //TODO add a stop method
 
         log().info("enqueue chunk: %s", path.c_str());
 
-        WorkerTask task{ dicker::UnitType::Chunk, path.c_str(), static_cast<size_t>(offset), static_cast<size_t>(len), size };
+        WorkerTask task{ dicker::UnitType::Chunk, path.c_str(), static_cast<size_t>(offset), static_cast<size_t>(len), size, mtime };
 
         if (!this->dispatch(n % this->workers.size(), task)) {
           log().error("No healthy workers");
@@ -307,7 +317,7 @@ struct Scheduler { //TODO add a stop method
     else {
       log().info("enqueue file: %s", path.c_str());
 
-      WorkerTask task{ dicker::UnitType::File, path.c_str(), 0, static_cast<size_t>(size), size };
+      WorkerTask task{ dicker::UnitType::File, path.c_str(), 0, static_cast<size_t>(size), size, mtime };
       size_t i = this->selectWorker(static_cast<AffinityKey>(affinity::forPath(entry.path())));
 
       if (!this->dispatch(i, task)) {

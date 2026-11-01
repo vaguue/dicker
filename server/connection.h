@@ -7,6 +7,8 @@
 #include <utility>
 #include <thread>
 #include <memory>
+#include <mutex>
+#include <unordered_map>
 #include <uv.h>
 #include "protocol.h"
 #include "byte_channel.h"
@@ -41,6 +43,7 @@ namespace dicker {
     static void on_write_download(uv_write_t* request, int status);
     static void on_resume_async(uv_async_t* handle);
     static void on_close_async(uv_async_t* handle);
+    static void on_outbox_async(uv_async_t* handle);
     static void on_handle_closed(uv_handle_t* handle);
 
     void handle_raw(const std::uint8_t* data, std::size_t len);
@@ -60,6 +63,8 @@ namespace dicker {
     void download_write(std::vector<std::uint8_t>&& bytes);
 
     void handle_upload();
+    bool handle_probe();
+    void post(const std::uint8_t* data, std::size_t len);
     void tls_write(const std::uint8_t* data, std::size_t len, bool teardown_after);
     void send_handshake_reply(HandshakeStatus status);
     void apply_backpressure();
@@ -72,6 +77,9 @@ namespace dicker {
     uv_tcp_t tcp_;
     uv_async_t resume_async_;
     uv_async_t close_async_;
+    uv_async_t outbox_async_;
+    std::mutex outbox_mutex_;
+    std::vector<std::uint8_t> outbox_;
 
     State state_;
     std::vector<std::uint8_t> handshake_buffer_;
@@ -92,6 +100,16 @@ namespace dicker {
     std::unique_ptr<StreamDecompressor> decompressor_;
     std::shared_ptr<FileSink> sink_;
     bool integrity_checks_;
+    std::uint16_t protocol_version_ = kMinProtocolVersion;
+    std::uint8_t mode_ = 0;
+
+    struct AcceptedUnit {
+      UnitType type;
+      std::string path;
+      std::uint64_t offset;
+    };
+
+    std::unordered_map<std::uint64_t, AcceptedUnit> accepted_;  // consumer thread only
 
     std::string peer_;          // logging: "ip:port" of the client
     std::string session_hex_;   // logging: session id once handshaken

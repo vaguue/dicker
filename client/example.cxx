@@ -11,6 +11,7 @@ using namespace std::chrono_literals;
 struct Progress {
   std::atomic<std::uint64_t> units{0};
   std::atomic<std::uint64_t> failed{0};
+  std::atomic<std::uint64_t> skipped{0};
   std::atomic<std::uint64_t> bytes{0};
   std::atomic<std::uint64_t> compressedBytes{0};
 };
@@ -49,6 +50,10 @@ int main(int argc, char** argv) {
     }
   });
 
+  dicker::events.on<"upload:skipped">([](const dicker::UploadSkipped&) noexcept {
+    progress.skipped++;
+  });
+
   const int reporter = muypoco::setInterval([]() noexcept {
     std::printf("   %llu units, %llu MB read, %llu MB sent\n",
                 static_cast<unsigned long long>(progress.units.load()),
@@ -71,8 +76,9 @@ int main(int argc, char** argv) {
   muypoco::clearInterval(reporter);
   muypoco::wait();
 
-  std::printf("done: %llu units, %llu failed, %llu MB read, %llu MB sent\n",
+  std::printf("done: %llu units, %llu skipped by the server, %llu failed, %llu MB read, %llu MB sent\n",
               static_cast<unsigned long long>(progress.units.load()),
+              static_cast<unsigned long long>(progress.skipped.load()),
               static_cast<unsigned long long>(progress.failed.load()),
               static_cast<unsigned long long>(megabytes(progress.bytes.load())),
               static_cast<unsigned long long>(megabytes(progress.compressedBytes.load())));

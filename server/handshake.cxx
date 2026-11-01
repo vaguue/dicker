@@ -35,7 +35,7 @@ namespace dicker {
     }
 
     std::uint16_t version = read_u16_le(buffer + kMagic.size());
-    if (version != kProtocolVersion) {
+    if (version < kMinProtocolVersion || version > kProtocolVersion) {
       return HandshakeStatus::BadVersion;
     }
 

@@ -6,7 +6,10 @@
 #include <array>
 #include <memory>
 #include <mutex>
+#include <functional>
 #include <map>
+#include <span>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -20,11 +23,37 @@ namespace dicker {
 
   struct FileSink;
 
+  namespace server {
+
+    enum struct ProbeHash {
+      none,
+      blake3,
+    };
+
+    // What a client wants to upload, asked before any data is sent.
+    struct Probe {
+      std::string_view session;
+      std::string_view peer;
+      std::string_view path;
+      UnitType type;               // File, or Chunk of a big file
+      std::uint64_t offset;        // where the chunk starts; 0 for a file
+      std::uint64_t length;        // bytes in this unit
+      std::uint64_t fileSize;      // size of the whole file
+      std::int64_t mtime;          // last write time, nanoseconds since the Unix epoch
+      std::span<const std::uint8_t> hash;  // BLAKE3 of the unit; empty unless ProbeHash::blake3
+    };
+
+    // Returns true to accept the unit. Runs on the connection's thread, possibly
+    // for several connections at once, so it has to be thread-safe.
+    using Filter = std::function<bool(const Probe&)>;
+
+  }
+
   struct ServerConfig {
     std::string key;
     std::filesystem::path root;
-    std::size_t channel_high_water;
-    std::size_t channel_low_water;
+    std::size_t channel_high_water = 8u * 1024 * 1024;  // stop reading a connection's socket at this many buffered bytes
+    std::size_t channel_low_water = 2u * 1024 * 1024;   // resume once the buffer drains to this
     bool default_routes = true;  // serve /, /uploads and /uploads/...
   };
 
@@ -54,6 +83,27 @@ namespace dicker {
       router.add(std::move(method), match, std::move(path), std::move(handler), std::move(middleware));
     }
 
+    // Puts the server in accept mode: protocol-2 clients probe every unit and
+    // upload only what `filter` accepts. Protocol-1 clients are not filtered.
+    // Set before listen().
+    void filter(server::Filter callback, server::ProbeHash hash = server::ProbeHash::none) {
+      filter_ = std::move(callback);
+      probe_hash_ = hash;
+    }
+
+    std::uint8_t mode_for(std::uint16_t version) const {
+      if (version < 2 || !filter_) {
+        return 0;
+      }
+
+      std::uint8_t mode = static_cast<std::uint8_t>(ServerMode::Accept);
+
+      if (probe_hash_ == server::ProbeHash::blake3) {
+        mode |= static_cast<std::uint8_t>(ServerMode::HashFirst);
+      }
+      return mode;
+    }
+
     const ServerConfig& config() const {
       return config_;
     }
@@ -76,6 +126,8 @@ namespace dicker {
     bool tcp_initialized_ = false;
     ServerConfig config_;
     Router router;
+    server::Filter filter_;
+    server::ProbeHash probe_hash_ = server::ProbeHash::none;
     uv_tcp_t tcp_server_;
     std::mutex sinks_mutex_;
     std::unordered_map<std::string, std::shared_ptr<FileSink>> sinks_;

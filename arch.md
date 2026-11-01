@@ -47,20 +47,24 @@ across connections and arrive out of order (reassembled by `pwrite` at offset).
 | field       | size | notes                                             |
 |-------------|------|---------------------------------------------------|
 | magic       | 4    | "DKR1"                                             |
-| version     | 2    | u16 LE, currently 1                               |
+| version     | 2    | u16 LE, 2 (the server also accepts 1)             |
 | flags       | 1    | bit0 = per-unit integrity checksum present         |
 | algo        | 1    | 1 = lz4 (frame, linked blocks), 2 = zstd          |
 | session_id  | 16   | client-generated, stable across reconnects        |
 | hmac        | 32   | HMAC-SHA256(key, first 24 bytes) — magic..session |
 
-## Handshake reply (server -> client, 5 bytes)
+## Handshake reply (server -> client, 5 bytes, 6 for an OK version-2 handshake)
 
 | field  | size | notes                                                    |
 |--------|------|----------------------------------------------------------|
 | magic  | 4    | "DKR1"                                                    |
 | status | 1    | 0 ok, 1 bad magic, 2 bad version, 3 auth, 4 algo, 5 error |
+| mode   | 1    | version 2 and status 0 only: bit0 accept mode, bit1 hash first |
 
-On non-zero status the server closes the connection.
+On non-zero status the server closes the connection. The server sets accept
+mode when it has a filter; version-1 clients never get it and are not filtered.
+A client that gets status 2 (bad version) for a version-2 handshake reconnects
+and repeats the handshake with version 1.
 
 ## Cmd (for now only one command, the upload itself)
 
@@ -104,6 +108,46 @@ The checksum covers the entire file (FILE) or the entire chunk (FILE_CHUNK),
 computed incrementally on both ends as blocks flow. END-OF-SESSION
 (`unit_type == 0xFF`) carries no other fields; the stream also ends on TCP FIN.
 
+## Accept mode (version 2)
+
+In accept mode the client asks before every unit, and the server's filter
+decides. A plain FILE/FILE_CHUNK header is a protocol error in this mode.
+
+Probe (client -> server):
+
+| field     | size     | notes                                                 |
+|-----------|----------|-------------------------------------------------------|
+| unit_type | 1        | 2 PROBE                                                |
+| key       | 8        | u64 LE, per-connection counter                         |
+| kind      | 1        | 0 FILE, 1 FILE_CHUNK                                   |
+| path_len  | 2        | u16 LE, 1..4096                                        |
+| path      | path_len | as in the unit header                                  |
+| offset    | 8        | u64 LE, chunk start (0 for FILE)                       |
+| length    | 8        | u64 LE, bytes in this unit                             |
+| file_size | 8        | u64 LE, size of the whole file                         |
+| mtime     | 8        | i64 LE, nanoseconds since the Unix epoch               |
+| hash      | 32       | hash-first mode only: BLAKE3 of the unit's bytes       |
+
+Probe reply (server -> client, in probe order):
+
+| field    | size | notes                    |
+|----------|------|--------------------------|
+| decision | 1    | 0 accept, 1 reject       |
+| key      | 8    | u64 LE, the probe's key  |
+
+An accepted unit is then sent with a short header, followed by the usual block
+stream and checksum trailer:
+
+| field     | size | notes                                     |
+|-----------|------|-------------------------------------------|
+| unit_type | 1    | 3 ACCEPTED                                |
+| key       | 8    | u64 LE, the accepted probe's key          |
+
+The server takes path, kind and offset from the accepted probe; an unknown key
+closes the connection. The client sends probes in batches of up to 32 (or
+fewer when it runs out of queued work), reads the replies once the batch is on
+the wire, then uploads the accepted units.
+
 ## Sizing
 
 - A file smaller than the big-file threshold (256 MB, like rclone's
@@ -119,7 +163,9 @@ computed incrementally on both ends as blocks flow. END-OF-SESSION
 - FILE_CHUNK: decode blocks, `pwrite` at `offset` (shared refcounted fd;
   out-of-order chunks across connections are fine).
 - Paths confined under the session dir; `..`/absolute/drive rejected.
-- v1: handshake-ack-only (no resume/dedup); fsync on close.
+- Without a filter: handshake-ack-only; fsync on close.
+- With a filter (accept mode): one reply per probe; rejected units are never
+  written.
 
 ## Compression
 

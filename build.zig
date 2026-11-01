@@ -34,6 +34,7 @@ const Deps = struct {
   zstd: *std.Build.Dependency,
   lz4: *std.Build.Dependency,
   wolfssl: *std.Build.Dependency,
+  blake3: *std.Build.Dependency,
 };
 
 const WolfConfig = enum {
@@ -304,6 +305,7 @@ pub fn build(b: *std.Build) void {
     .zstd = b.dependency("zstd", .{}),
     .lz4 = b.dependency("lz4", .{}),
     .wolfssl = b.dependency("wolfssl", .{}),
+    .blake3 = b.dependency("blake3", .{}),
   };
 
   const client_library = clientLibrary(b, deps, target, optimize);
@@ -373,6 +375,7 @@ fn clientLibrary(b: *std.Build, deps: Deps, target: std.Build.ResolvedTarget, op
 
   addZstd(module, deps.zstd);
   addLz4(module, deps.lz4);
+  addBlake3(b, module, deps.blake3, target);
 
   const wolfssl_options = addWolfssl(b, module, deps.wolfssl, target);
   const library = b.addLibrary(.{ .name = "dicker", .root_module = module, .linkage = .static });
@@ -385,6 +388,7 @@ fn clientLibrary(b: *std.Build, deps: Deps, target: std.Build.ResolvedTarget, op
   library.installHeader(deps.lz4.path("lib/lz4.h"), "lz4.h");
   library.installHeader(deps.lz4.path("lib/lz4hc.h"), "lz4hc.h");
   library.installHeader(deps.lz4.path("lib/lz4frame.h"), "lz4frame.h");
+  library.installHeader(deps.blake3.path("c/blake3.h"), "blake3.h");
   library.installHeadersDirectory(deps.wolfssl.path("wolfssl"), "wolfssl", .{ .include_extensions = &.{".h"} });
   library.installHeader(wolfssl_options, "wolfssl/options.h");
 
@@ -413,6 +417,34 @@ fn addLz4(module: *std.Build.Module, lz4: *std.Build.Dependency) void {
     .flags = &vendor_c_flags,
     .language = .c,
   });
+}
+
+fn addBlake3(b: *std.Build, module: *std.Build.Module, blake3: *std.Build.Dependency, target: std.Build.ResolvedTarget) void {
+  const result = target.result;
+  var files: std.ArrayList([]const u8) = .empty;
+  var flags: std.ArrayList([]const u8) = .empty;
+
+  files.appendSlice(b.allocator, &.{ "c/blake3.c", "c/blake3_dispatch.c", "c/blake3_portable.c" }) catch @panic("OOM");
+  flags.appendSlice(b.allocator, &vendor_c_flags) catch @panic("OOM");
+
+  switch (result.cpu.arch) {
+    .x86_64 => {
+      const flavor = if (result.os.tag == .windows) "windows_gnu" else "unix";
+      for ([_][]const u8{ "sse2", "sse41", "avx2", "avx512" }) |extension| {
+        files.append(b.allocator, b.fmt("c/blake3_{s}_x86-64_{s}.S", .{ extension, flavor })) catch @panic("OOM");
+      }
+    },
+    .aarch64 => {
+      files.append(b.allocator, "c/blake3_neon.c") catch @panic("OOM");
+      flags.append(b.allocator, "-DBLAKE3_USE_NEON=1") catch @panic("OOM");
+    },
+    else => {
+      flags.appendSlice(b.allocator, &.{ "-DBLAKE3_NO_SSE2", "-DBLAKE3_NO_SSE41", "-DBLAKE3_NO_AVX2", "-DBLAKE3_NO_AVX512" }) catch @panic("OOM");
+    },
+  }
+
+  module.addIncludePath(blake3.path("c"));
+  module.addCSourceFiles(.{ .root = blake3.path(""), .files = files.items, .flags = flags.items });
 }
 
 fn wolfConfig(target: std.Build.ResolvedTarget) WolfConfig {

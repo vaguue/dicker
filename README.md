@@ -87,8 +87,6 @@ int main() {
   dicker::ServerConfig config;
   config.key = "dicker-secret";
   config.root = "/backups";
-  config.channel_high_water = 64 * 1024 * 1024;
-  config.channel_low_water = 16 * 1024 * 1024;
 
   dicker::Server server(config);
 
@@ -108,8 +106,26 @@ int main() {
 ```
 
 - Routes: `server.route(method, path, handler)` for exact paths, `server.route(method, dicker::Match::Prefix, "/files/", handler)` for prefixes (the tail is `ctx.param`). An optional last argument is a middleware chain, e.g. `{dicker::mw::require_auth}`. Your routes are checked before the built-in `/`, `/uploads` and `/uploads/...`. To turn the built-ins off, set `config.default_routes = false`.
+- Filtering uploads: `server.filter(callback)` puts the server in accept mode, see below.
 - `server.run()` serves until `server.stop()`, which works from any thread, a route handler included.
 - Server events, on `dicker::server::events`: `"client:connected"`, `"upload:started"`, `"upload:finished"` and `"client:disconnected"`. They run on the server's threads.
+
+### Filtering uploads
+
+The server can decide per unit (a file, or a chunk of a big file) whether it wants it, before any data is sent:
+
+```cpp
+server.filter([](const dicker::server::Probe& probe) {
+  return !alreadyStored(probe.path, probe.offset, probe.hash);
+}, dicker::server::ProbeHash::blake3);
+```
+
+- `Probe` has `session`, `peer`, `path`, `type`, `offset`, `length`, `fileSize`, `mtime` (nanoseconds since the Unix epoch) and `hash`.
+- With `ProbeHash::blake3` the client hashes each unit before asking, so it reads everything twice. That pays off when most of it is already on the server. Without it `hash` is empty and you decide on path, size and mtime.
+- The callback runs on the connection's thread, possibly for several connections at once, so make it thread-safe.
+- A rejected unit is never written. Rejecting a unit because the same *content* exists under another path leaves that path empty, unless your app puts the data there itself, e.g. with a hardlink. Keying on path + offset + hash (like [server/example.cxx](server/example.cxx)) is always safe.
+- Rejections emit `"upload:skipped"` on both sides: `dicker::events` on the client, `dicker::server::events` on the server.
+- Protocol: the client probes in batches and uploads what's accepted. Details in [arch.md](arch.md). Old and new versions mix freely: protocol-1 clients upload to a new server unfiltered, and a new client that meets a protocol-1 server reconnects and speaks protocol 1, at the cost of one extra connection per worker.
 
 ## Notes
 
