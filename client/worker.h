@@ -67,7 +67,7 @@ struct PendingUnit {
 };
 
 struct Worker {
-  static constexpr size_t kProbeWindow = 128;
+  static constexpr size_t kProbeWindow = 128; //TODO full pipelining (reader thread + wolfSSL write_dup) to hide the per-batch round trip, ~1.6x slower than no filter on many small files over WAN
 
   uint8_t outBuf[OUT_BUF_SIZE];
 

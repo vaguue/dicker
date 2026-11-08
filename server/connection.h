@@ -14,6 +14,7 @@
 #include "byte_channel.h"
 #include "decompressor.h"
 #include "tls_layer.h"
+#include "stream.h"
 
 namespace dicker {
 
@@ -44,6 +45,7 @@ namespace dicker {
     static void on_resume_async(uv_async_t* handle);
     static void on_close_async(uv_async_t* handle);
     static void on_outbox_async(uv_async_t* handle);
+    static void onStreamAsync(uv_async_t* handle);
     static void on_handle_closed(uv_handle_t* handle);
 
     void handle_raw(const std::uint8_t* data, std::size_t len);
@@ -58,6 +60,10 @@ namespace dicker {
                           const std::string& content_type, const std::string& body,
                           const std::vector<std::pair<std::string, std::string>>& extra = {});
     void begin_download_response(const std::string& session_id, const std::string& dir_path);
+    void beginStream(int status, const std::string& type,
+                     const std::vector<std::pair<std::string, std::string>>& headers,
+                     std::shared_ptr<Stream> stream);
+    void pumpStream();
     void pump_download();
     void download_send(std::vector<std::uint8_t>&& plain);
     void download_write(std::vector<std::uint8_t>&& bytes);
@@ -94,6 +100,14 @@ namespace dicker {
     bool http_done_ = false;
     std::unique_ptr<ArchiveStreamer> download_;
     bool download_last_ = false;
+
+    std::shared_ptr<Stream> stream_;
+    uv_async_t streamAsync_;
+    bool streamAsyncReady_ = false;
+    bool streamIdle_ = false;
+    bool streamHeadSent_ = false;
+    std::string streamHead_;
+    std::string streamTaken_;
 
     ByteChannel channel_;
     std::thread consumer_;

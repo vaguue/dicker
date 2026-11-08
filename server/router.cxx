@@ -91,9 +91,21 @@ namespace dicker {
     Next next{*matched, conn, 0};
     next(ctx);  // runs the middleware chain, then the handler
 
-    if (ctx.respond) {
+    if (!ctx.respond) {
+      return;
+    }
+
+    auto* stream = std::get_if<std::shared_ptr<Stream>>(&ctx.body);
+
+    if (stream != nullptr && *stream) {
+      conn.beginStream(ctx.status, ctx.type, ctx.headers, *stream);
+    }
+    else if (stream != nullptr) {
+      conn.send_http_simple(ctx.status, reason_phrase(ctx.status), ctx.type, "", ctx.headers);
+    }
+    else {
       conn.send_http_simple(ctx.status, reason_phrase(ctx.status), ctx.type,
-                            ctx.body, ctx.headers);
+                            std::get<std::string>(ctx.body), ctx.headers);
     }
   }
 

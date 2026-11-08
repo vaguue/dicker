@@ -290,6 +290,7 @@ const server_sources = [_][]const u8{
   "server/archive.cxx",
   "server/router.cxx",
   "server/http_context.cxx",
+  "server/stream.cxx",
 };
 
 pub fn build(b: *std.Build) void {

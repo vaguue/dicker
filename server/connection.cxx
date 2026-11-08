@@ -405,7 +405,104 @@ namespace dicker {
     download_send(std::vector<std::uint8_t>(head.begin(), head.end()));
   }
 
+  void Connection::beginStream(int status, const std::string& type,
+                               const std::vector<std::pair<std::string, std::string>>& headers,
+                               std::shared_ptr<Stream> stream) {
+    stream_ = std::move(stream);
+
+    std::vector<std::pair<std::string, std::string>> extra = headers;
+    extra.emplace_back("Transfer-Encoding", "chunked");
+    extra.emplace_back("Connection", "close");
+    streamHead_ = http_response_headers(status, reason_phrase(status), type, -1, extra);
+
+    uv_async_init(tcp_.loop, &streamAsync_, onStreamAsync);
+    streamAsync_.data = this;
+    streamAsyncReady_ = true;
+    stream_->attach([this]() {
+      uv_async_send(&streamAsync_);
+    });
+
+    download_last_ = false;
+    pumpStream();
+  }
+
+  void Connection::pumpStream() {
+    bool ended = false;
+    bool failed = false;
+    int failStatus = 500;
+    std::string failType;
+    std::string failBody;
+
+    streamTaken_.clear();
+    {
+      std::lock_guard<std::mutex> lock(stream_->mutex);
+      streamTaken_.swap(stream_->queued);
+      ended = stream_->ended;
+      failed = stream_->failed;
+      if (failed) {
+        failStatus = stream_->failStatus;
+        failType = stream_->failType;
+        failBody = stream_->failBody;
+      }
+    }
+    stream_->drained.notify_all();
+
+    if (failed) {
+      if (streamHeadSent_) {
+        begin_teardown();
+      }
+      else {
+        streamHeadSent_ = true;
+        send_http_simple(failStatus, reason_phrase(failStatus), failType, failBody);
+      }
+      return;
+    }
+
+    if (streamTaken_.empty() && !ended) {
+      streamIdle_ = true;
+      return;
+    }
+
+    std::vector<std::uint8_t> out;
+
+    if (!streamHeadSent_) {
+      out.insert(out.end(), streamHead_.begin(), streamHead_.end());
+      streamHeadSent_ = true;
+    }
+
+    if (!streamTaken_.empty()) {
+      char size[32];
+      int length = std::snprintf(size, sizeof size, "%zx\r\n", streamTaken_.size());
+      out.reserve(out.size() + static_cast<std::size_t>(length) + streamTaken_.size() + 7);
+      out.insert(out.end(), size, size + length);
+      out.insert(out.end(), streamTaken_.begin(), streamTaken_.end());
+      out.push_back('\r');
+      out.push_back('\n');
+    }
+
+    if (ended) {
+      static const char last[] = "0\r\n\r\n";
+      out.insert(out.end(), last, last + sizeof last - 1);
+      download_last_ = true;
+    }
+
+    download_send(std::move(out));
+  }
+
+  void Connection::onStreamAsync(uv_async_t* handle) {
+    Connection* connection = static_cast<Connection*>(handle->data);
+    if (!connection->stream_ || !connection->streamIdle_ || connection->teardown_started_) {
+      return;
+    }
+    connection->streamIdle_ = false;
+    connection->pumpStream();
+  }
+
   void Connection::pump_download() {
+    if (stream_) {
+      pumpStream();
+      return;
+    }
     if (!download_) {
       begin_teardown();
       return;
@@ -904,6 +1001,13 @@ namespace dicker {
     close_handle(reinterpret_cast<uv_handle_t*>(&resume_async_));
     close_handle(reinterpret_cast<uv_handle_t*>(&close_async_));
     close_handle(reinterpret_cast<uv_handle_t*>(&outbox_async_));
+
+    if (stream_) {
+      stream_->detach();
+    }
+    if (streamAsyncReady_) {
+      close_handle(reinterpret_cast<uv_handle_t*>(&streamAsync_));
+    }
   }
 
   void Connection::close_handle(uv_handle_t* handle) {

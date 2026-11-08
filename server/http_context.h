@@ -1,9 +1,12 @@
 #pragma once
 
+#include <memory>
 #include <string>
 #include <utility>
+#include <variant>
 #include <vector>
 #include "http.h"
+#include "stream.h"
 
 namespace dicker {
 
@@ -33,7 +36,7 @@ namespace dicker {
     // ---- response (set these; the router sends them) ----
     int status = 200;
     std::string type = "text/plain; charset=utf-8";
-    std::string body;
+    std::variant<std::string, std::shared_ptr<Stream>> body;
     std::vector<std::pair<std::string, std::string>> headers;
     bool respond = true;
 
